@@ -1,0 +1,10 @@
+# 统一换行符为 LF。
+# 开发在 Windows（core.autocrlf=true），构建在 Linux（GitHub Actions）上跑，
+# 显式声明可以保证无论谁 checkout，源文件都是 LF，避免跨平台差异。
+* text=auto eol=lf
+
+# 二进制文件不要按文本处理，否则会被改坏
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary

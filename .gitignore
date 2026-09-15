@@ -1,0 +1,10 @@
+# buildozer / python-for-android 构建产物
+bin/
+.buildozer/
+__pycache__/
+*.pyc
+*.pyo
+
+# 本地配置与书籍缓存
+books/
+config.json
