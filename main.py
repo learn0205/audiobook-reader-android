@@ -156,6 +156,7 @@ class AudioBookApp(App):
 
     # ---- 供 KV 绑定的属性 ----
     book_title = StringProperty("未打开书籍")
+    chapter_text = StringProperty("")
     progress_text = StringProperty("00:00 / 00:00  0.0%")
     sleep_text = StringProperty("")
     play_label = StringProperty("▶ 播放")
@@ -302,17 +303,19 @@ class AudioBookApp(App):
         body.add_widget(self.lbl_hint)
         root.add_widget(body)
 
-        # ---- 进度 ----
+        # ---- 进度区（按章进度，参照番茄小说） ----
         prog_box = BoxLayout(orientation="vertical", size_hint_y=None,
-                             height=dp(58), padding=[dp(10), 0])
-        info_row = BoxLayout(size_hint_y=None, height=dp(20))
-        self.lbl_progress = Label(text=self.progress_text, font_size="12sp",
-                                  halign="left", valign="middle")
-        self.lbl_progress.bind(
-            size=lambda w, *_: setattr(w, "text_size", (w.width, w.height)))
-        self.bind(progress_text=lambda _i, v: setattr(self.lbl_progress, "text", v))
+                             height=dp(78), padding=[dp(10), 0])
 
-        # 定时休眠倒计时：之前只在内部倒数、界面完全看不到，现在显式展示
+        # 第一行：当前章节名 + 定时休眠倒计时
+        head_row = BoxLayout(size_hint_y=None, height=dp(20))
+        self.lbl_chapter = Label(text=self.chapter_text, font_size="12sp",
+                                 halign="left", valign="middle",
+                                 shorten=True, shorten_from="right")
+        self.lbl_chapter.bind(
+            size=lambda w, *_: setattr(w, "text_size", (w.width, w.height)))
+        self.bind(chapter_text=lambda _i, v: setattr(self.lbl_chapter, "text", v))
+
         self.lbl_sleep = Label(text=self.sleep_text, font_size="12sp",
                                size_hint_x=None, width=dp(104),
                                halign="right", valign="middle",
@@ -321,13 +324,25 @@ class AudioBookApp(App):
             size=lambda w, *_: setattr(w, "text_size", (w.width, w.height)))
         self.bind(sleep_text=lambda _i, v: setattr(self.lbl_sleep, "text", v))
 
-        info_row.add_widget(self.lbl_progress)
-        info_row.add_widget(self.lbl_sleep)
+        head_row.add_widget(self.lbl_chapter)
+        head_row.add_widget(self.lbl_sleep)
+
+        # 第二行：本章进度条（点击或拖动都能跳转）
         self.slider = Slider(min=0, max=1, value=0)
         self.slider.bind(on_touch_down=self._slider_down,
                          on_touch_up=self._slider_up)
-        prog_box.add_widget(info_row)
+
+        # 第三行：本章已播 / 本章总时长 / 百分比
+        self.lbl_progress = Label(text=self.progress_text, font_size="12sp",
+                                  size_hint_y=None, height=dp(18),
+                                  halign="left", valign="middle")
+        self.lbl_progress.bind(
+            size=lambda w, *_: setattr(w, "text_size", (w.width, w.height)))
+        self.bind(progress_text=lambda _i, v: setattr(self.lbl_progress, "text", v))
+
+        prog_box.add_widget(head_row)
         prog_box.add_widget(self.slider)
+        prog_box.add_widget(self.lbl_progress)
         root.add_widget(prog_box)
 
         # ---- 控制行 ----
@@ -479,6 +494,10 @@ class AudioBookApp(App):
         start = max(0, min(start, len(self._paragraphs) - 1))
         self._engine.seek_paragraph(start)
         self._set_highlight(start)
+
+        # 初始化底部"当前章节"显示（进度条是按章的，得先知道在哪一章）
+        _ci, ctitle, _cs, _ce = self._chapter_at(start)
+        self.chapter_text = ctitle or ""
 
         self._config.set("last_book", doc.path)
         if not saved:
@@ -721,12 +740,18 @@ class AudioBookApp(App):
         return False
 
     def seek_fraction(self, fraction):
-        """进度条跳转：比例 → 字符位置 → 段落。"""
+        """拖动进度条 → 在**本章范围内**跳转（与进度条的章内语义保持一致）。"""
         if not self._paragraphs or self._total_chars <= 0:
             return
-        char_target = int(max(0.0, min(1.0, fraction)) * self._total_chars)
+        para_now = self._engine.get_position()[0]
+        _ci, _ct, cstart, cend = self._chapter_at(para_now)
+        lo, hi = self._chapter_char_span(cstart, cend)
+        target = lo + int(max(0.0, min(1.0, fraction)) * (hi - lo))
+        # 关键：夹在本章内。hi 是「下一章第一段」的起点，不夹的话拖到最右
+        # 会直接跳进下一章，进度条随即又变回 0%，体验很怪。
+        target = min(target, hi - 1)
         index = bisect.bisect_right(self._offsets,
-                                   min(char_target, self._total_chars - 1)) - 1
+                                    min(target, self._total_chars - 1)) - 1
         index = max(0, min(index, len(self._paragraphs) - 1))
         self._engine.seek_paragraph(index)
         self._set_highlight(index)
@@ -735,17 +760,58 @@ class AudioBookApp(App):
     # ============================================================
     #                      引擎回调
     # ============================================================
+    def _chapter_at(self, para_index):
+        """返回当前段所属章节的 (序号, 标题, 起始段, 结束段)。
+
+        没有识别到章节时，把整本书当作一个章节。
+        """
+        total_para = len(self._paragraphs)
+        if total_para == 0:
+            return 0, "", 0, 0
+        if not self._chapters:
+            return 0, self.book_title, 0, total_para - 1
+        idx = 0
+        for i, (_title, start) in enumerate(self._chapters):
+            if start <= para_index:
+                idx = i
+            else:
+                break
+        title = self._chapters[idx][0]
+        start = self._chapters[idx][1]
+        end = (self._chapters[idx + 1][1] - 1
+               if idx + 1 < len(self._chapters) else total_para - 1)
+        return idx, title, max(0, start), max(start, end)
+
+    def _chapter_char_span(self, cstart, cend):
+        """章节对应的字符区间 [起, 止)，用于把进度换算到章内比例。"""
+        offsets = self._offsets
+        lo = offsets[min(cstart, len(offsets) - 1)]
+        hi = offsets[min(cend + 1, len(offsets) - 1)]
+        return lo, max(lo + 1, hi)
+
     def _on_progress(self, char_pos, total):
+        """刷新进度。
+
+        进度条是**按章**的（参照番茄小说）：每一章有自己独立的进度，
+        而不是整本书一条到底 —— 整本书动辄几百小时，那条进度条没有参考价值。
+        """
         if total <= 0 or self._dragging or not hasattr(self, "slider"):
             return
-        fraction = max(0.0, min(1.0, char_pos / float(total)))
+        para_now = self._engine.get_position()[0]
+        _ci, ctitle, cstart, cend = self._chapter_at(para_now)
+        lo, hi = self._chapter_char_span(cstart, cend)
+        span = hi - lo
+        fraction = max(0.0, min(1.0, (char_pos - lo) / float(span)))
         self.slider.value = fraction
+
+        if ctitle and ctitle != self.chapter_text:
+            self.chapter_text = ctitle
+
         speed = max(0.1, float(self._config.get("speed", 1.0)))
-        # 用引擎实测的语速（倍速 1.0 基准）乘以当前倍速来估算总时长，
-        # 比之前硬编码 4.2 字/秒准得多（不同 TTS 引擎差异很大）。
+        # 用引擎实测的语速（倍速 1.0 基准）乘以当前倍速估算，比硬编码准得多
         cps = max(0.5, self._engine.get_cps()) * speed
-        total_sec = total / cps
-        self.progress_text = "%s / %s  %.1f%%" % (
+        total_sec = span / cps
+        self.progress_text = "本章 %s / %s  %.1f%%" % (
             self._fmt(fraction * total_sec), self._fmt(total_sec), fraction * 100)
 
     @staticmethod
@@ -800,6 +866,10 @@ class AudioBookApp(App):
         """
         if self._engine.get_state() == STATE_PLAYING:
             self._save_position()
+            # 用引擎的插值位置刷新进度条：否则它只在每读完一个朗读块时跳一格，
+            # 长句会明显一顿一顿。0.4 秒刷一次，看起来是连续推进的。
+            _para, char_now, total_chars = self._engine.get_position()
+            self._on_progress(char_now, total_chars)
         if self._sleep_until > 0:
             left = self._sleep_until - time.time()
             if left <= 0:

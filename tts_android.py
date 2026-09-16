@@ -23,11 +23,12 @@ import time
 
 # ---- 尝试导入 pyjnius（仅安卓打包后存在） ----
 try:
-    from jnius import autoclass, PythonJavaClass, java_method
+    from jnius import autoclass, cast, PythonJavaClass, java_method
     _JNIUS_OK = True
     _JNIUS_ERR = ""
 except Exception as _e:                      # 桌面环境：不影响模块导入
     autoclass = None
+    cast = None
     PythonJavaClass = object
     java_method = None
     _JNIUS_OK = False
@@ -408,13 +409,25 @@ class AndroidTTS:
             self.stop()
 
     def _speak_text(self, text, utterance_id):
-        """调用 speak()；不同安卓版本 Bundle 参数写法不同，这里做兼容。"""
+        """调用 speak()。
+
+        ⚠️ 关键坑：pyjnius **无法**把 Python 的 str 自动匹配到 speak() 的
+        CharSequence 重载，会直接报
+            No methods called speak in android/speech/tts/TextToSpeech
+            matching your arguments
+        必须显式 new 一个 java.lang.String，再 cast 成 java.lang.CharSequence。
+        （这是实机报错截图定位出来的，桌面环境测不到。）
+
+        Bundle 参数在个别老版本上不接受 null，故保留一层兜底。
+        """
         QUEUE_FLUSH = 0
+        jstring = autoclass("java.lang.String")(text)
+        seq = cast("java.lang.CharSequence", jstring)
         try:
-            self._tts.speak(text, QUEUE_FLUSH, None, utterance_id)
+            self._tts.speak(seq, QUEUE_FLUSH, None, utterance_id)
         except Exception:
             Bundle = autoclass("android.os.Bundle")
-            self._tts.speak(text, QUEUE_FLUSH, Bundle(), utterance_id)
+            self._tts.speak(seq, QUEUE_FLUSH, Bundle(), utterance_id)
 
     def _pitch_multiplier(self, para_index, sent_index):
         """计算这一句该用的音调倍率（1.0 为正常）。
