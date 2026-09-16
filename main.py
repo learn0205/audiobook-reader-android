@@ -166,6 +166,31 @@ class AudioBookApp(App):
     # ============================================================
     def build(self):
         self.title = "有声书朗读"
+        # 启动阶段的任何异常都渲染到屏幕上。
+        # 安卓上普通用户拿不到 logcat，这是唯一能让用户把真实报错反馈回来的办法。
+        try:
+            return self._build_real()
+        except Exception:
+            return self._build_crash_screen(traceback.format_exc())
+
+    def _build_crash_screen(self, tb_text):
+        """把启动失败的 traceback 直接显示在屏幕上（可滚动、可截图）。"""
+        from kivy.uix.scrollview import ScrollView
+        root = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(6))
+        root.add_widget(Label(
+            text="启动失败 — 请把本页截图发给开发者",
+            size_hint_y=None, height=dp(34), font_size="14sp",
+            color=(1, .45, .45, 1)))
+        scroll = ScrollView()
+        label = Label(text=tb_text, size_hint_y=None, halign="left",
+                      valign="top", font_size="11sp")
+        label.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        label.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+        scroll.add_widget(label)
+        root.add_widget(scroll)
+        return root
+
+    def _build_real(self):
         Builder.load_string(KV)
 
         # 配置与语音引擎都放在应用私有目录（安卓上必然可写）
