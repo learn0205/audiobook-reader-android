@@ -39,8 +39,6 @@ requirements = python3,kivy,pyjnius,android
 
 orientation = portrait
 fullscreen = 0
-# 保持屏幕常亮（听书时很实用）
-android.keep_screen_on = True
 
 icon.filename = %(source.dir)s/icon.png
 
@@ -52,7 +50,19 @@ android.archs = arm64-v8a
 # Android 版本：minapi 24 = Android 7.0，api 33 = Android 13
 android.api = 33
 android.minapi = 24
-android.ndk = 25b
+
+# ⚠️ 这里**故意不写 android.ndk**，让 buildozer 自动采用 p4a 推荐的版本。
+#   p4a develop 的 pythonforandroid/recommendations.py 里写着
+#       RECOMMENDED_NDK_VERSION = "28c"
+#   buildozer 会自动去读这个值（buildozer/targets/android.py 的
+#   p4a_recommended_android_ndk 属性），读到就用它，读不到才退回自己的默认值 28c。
+#
+#   之前我硬写 android.ndk = 25b，覆盖了这个机制，结果踩坑：
+#   libthorvg recipe 第 98 行要 glob 出 NDK 里的
+#       <ndk>/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/lib/linux/aarch64
+#   再从中拷 libomp.so，旧版 NDK 里该目录不存在，直接
+#       IndexError: list index out of range
+#   不写这一行就不会有这个问题，以后 p4a 升 NDK 也能自动跟上。
 
 # ---------------------------------------------------------------------------
 #  ⚠️ 关键：必须用 develop 分支的 python-for-android，否则 arm64 构建必失败
