@@ -667,11 +667,10 @@ class AudioBookApp(App):
         if not bookmarks:
             self._toast("本书还没有书签（长按正文段落可添加）")
             return
-        from kivy.uix.scrollview import ScrollView
         popup = Popup(title="书签（%d 条）" % len(bookmarks),
                       size_hint=(0.92, 0.8))
         box = BoxLayout(orientation="vertical")
-        scroll = ScrollView()
+        scroll = self._make_scroll()
         inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(2))
         inner.bind(minimum_height=inner.setter("height"))
         for bookmark in bookmarks:
@@ -906,14 +905,35 @@ class AudioBookApp(App):
                 pass
             self._status_popup = None
 
+    @staticmethod
+    def _make_scroll():
+        """构造一个「滚动条可以用手指拖」的 ScrollView。
+
+        Kivy 默认参数在手机上等于没法用：
+          · scroll_type 默认 ['content'] —— 滚动条根本不是拖动目标
+          · bar_width   默认只有 3px    —— 手指压根按不住
+        合起来就是用户说的"右侧滚动条拖不动"。
+
+        这里改成 bars+content 并加宽到 16dp（手指可点的尺寸），
+        同时把颜色调亮一点，让用户知道这条能拖。
+        """
+        from kivy.uix.scrollview import ScrollView
+        return ScrollView(
+            scroll_type=["bars", "content"],
+            bar_width=dp(16),
+            bar_margin=0,
+            bar_pos_y="right",
+            bar_color=(0.35, 0.62, 1.0, 0.95),
+            bar_inactive_color=(0.35, 0.62, 1.0, 0.55),
+        )
+
     def show_chapters(self):
         """章节目录：点章节 → 跳转并开始朗读。"""
         if not self._chapters:
             self._toast("本书没有识别到章节")
             return
-        from kivy.uix.scrollview import ScrollView
         box = BoxLayout(orientation="vertical")
-        scroll = ScrollView()
+        scroll = self._make_scroll()
         inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(2))
         inner.bind(minimum_height=inner.setter("height"))
         popup = Popup(title="目录", size_hint=(0.92, 0.85))
