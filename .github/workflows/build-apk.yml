@@ -45,7 +45,21 @@ jobs:
             buildozer-${{ runner.os }}-
 
       - name: Build debug APK
-        run: buildozer -v android debug
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee buildozer.log
+
+      # 失败时把真正的报错单独打出来。
+      # buildozer 的完整日志有几十万行，GitHub 网页端会截断，根本看不到根因；
+      # 这一步只输出「命中的错误行 + 最后 60 行」，很短、不会被截断。
+      - name: Show build errors (on failure)
+        if: failure()
+        run: |
+          echo "==================== 命中的错误行 ===================="
+          grep -nE "ERROR:|error:|Traceback|No matching distribution|not a supported wheel|ErrorReturnCode|FAILED:|No space left" buildozer.log | tail -40 || true
+          echo
+          echo "==================== 日志最后 60 行 ===================="
+          tail -60 buildozer.log || true
 
       - name: Show output
         run: ls -lh bin/ || true

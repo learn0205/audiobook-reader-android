@@ -54,6 +54,21 @@ android.api = 33
 android.minapi = 24
 android.ndk = 25b
 
+# ---------------------------------------------------------------------------
+#  ⚠️ 关键：必须用 develop 分支的 python-for-android，否则 arm64 构建必失败
+#
+#  原因：p4a 在安装纯 Python 模块时，解析阶段传了 --platform=android_..._arm64_v8a，
+#  但真正安装时漏传，导致 pip 用宿主平台（linux_x86_64）去校验，直接拒绝安卓轮子：
+#      ERROR: charset_normalizer-3.5.1-cp314-cp314-android_24_arm64_v8a.whl
+#             is not a supported wheel on this platform.
+#  而 charset-normalizer 只发布了 arm64_v8a / x86_64 的安卓轮子、没有 v7a，
+#  所以「32 位能过、64 位挂」—— 这正是我们要的 arm64 会踩的坑。
+#
+#  实测：master 分支和 v2026.05.09 等全部 tag 都还是有 bug 的旧代码，
+#       只有 develop 分支在安装时补上了 --platform。见 kivy/buildozer#2051
+# ---------------------------------------------------------------------------
+p4a.branch = develop
+
 # 不需要任何存储权限：
 # 导入书籍走系统的 SAF 文件选择器（ACTION_OPEN_DOCUMENT），
 # 选中的文件会被复制进应用私有目录，因此不必申请 READ_EXTERNAL_STORAGE。
