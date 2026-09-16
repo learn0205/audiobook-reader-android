@@ -21,7 +21,9 @@ package.name = audiobookreader
 package.domain = org.audiobookreader
 
 source.dir = .
-source.include_exts = py,png,jpg,jpeg,kv,atlas,ttf
+# ⚠️ otf 必须包含：中文字体 fonts/NotoSansSC-Regular.otf 要一起打进 APK，
+# 否则 Kivy 用默认的 Roboto，界面上所有中文都是空白。
+source.include_exts = py,png,jpg,jpeg,kv,atlas,ttf,otf
 
 # 不打包这些开发期产物
 source.exclude_dirs = bin,.buildozer,__pycache__,.github

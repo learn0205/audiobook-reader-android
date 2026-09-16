@@ -48,6 +48,25 @@ from book_parser import load_book as parse_book_file
 from config_manager import ConfigManager
 from tts_android import STATE_PAUSED, STATE_PLAYING, AndroidTTS
 
+# ============================================================================
+#  中文字体注册 —— 不做这一步，界面上所有中文都是空白！
+#
+#  Kivy 默认字体是 Roboto，**不含任何中文字形**，中文会渲染成空白（豆腐块）。
+#  这里把 Noto Sans SC（Google 出品，OFL 开源许可，可自由分发）注册成默认字体名
+#  "Roboto"，等于全局替换默认字体，所有控件自动生效，无需逐个设 font_name。
+#
+#  字体随源码一起打包进 APK（见 buildozer.spec 的 source.include_exts 里的 otf）。
+#  用 __file__ 定位而不是相对路径，避免受工作目录影响。
+# ============================================================================
+from kivy.core.text import LabelBase
+
+_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "fonts", "NotoSansSC-Regular.otf")
+if os.path.isfile(_FONT_PATH):
+    LabelBase.register(name="Roboto", fn_regular=_FONT_PATH)
+else:                                        # 字体缺失时给个明确提示，别静默变空白
+    print("[警告] 找不到中文字体，界面中文将无法显示：%s" % _FONT_PATH)
+
 # 请求码：文件选择器
 REQUEST_PICK_BOOK = 1001
 
@@ -295,7 +314,7 @@ class AudioBookApp(App):
 
         # 定时休眠倒计时：之前只在内部倒数、界面完全看不到，现在显式展示
         self.lbl_sleep = Label(text=self.sleep_text, font_size="12sp",
-                               size_hint_x=None, width=dp(92),
+                               size_hint_x=None, width=dp(104),
                                halign="right", valign="middle",
                                color=(.90, .49, .13, 1))
         self.lbl_sleep.bind(
@@ -582,7 +601,7 @@ class AudioBookApp(App):
         box.add_widget(_action("▶ 从这里开始朗读",
                                lambda: self.tap_paragraph(index)))
         if has_bookmark:
-            box.add_widget(_action("✖ 删除此处书签",
+            box.add_widget(_action("× 删除此处书签",
                                    lambda: self.remove_bookmark(index),
                                    color=(.55, .25, .25, 1)))
         else:
@@ -740,14 +759,14 @@ class AudioBookApp(App):
 
     def _on_state(self, state):
         def _apply(_dt):
-            self.play_label = "⏸ 暂停" if state == STATE_PLAYING else "▶ 播放"
+            self.play_label = "‖ 暂停" if state == STATE_PLAYING else "▶ 播放"
             # 界面可能还没建好（引擎初始化回调早于 build 完成）
             if hasattr(self, "btn_play"):
                 self.btn_play.text = self.play_label
         Clock.schedule_once(_apply, 0)
 
     def _on_finished(self):
-        Clock.schedule_once(lambda _dt: self._toast("本书朗读完毕 🎉"), 0)
+        Clock.schedule_once(lambda _dt: self._toast("本书朗读完毕"), 0)
 
     def _on_error(self, message):
         """错误提示：同样的信息只弹一次，避免连续失败时刷屏。"""
@@ -787,9 +806,9 @@ class AudioBookApp(App):
                 self._sleep_until = 0
                 self.sleep_text = ""
                 self._engine.stop()
-                self._toast("⏰ 定时时间到，已自动停止朗读")
+                self._toast("定时时间到，已自动停止朗读")
             else:
-                self.sleep_text = "⏳ %02d:%02d" % divmod(int(left), 60)
+                self.sleep_text = "剩余 %02d:%02d" % divmod(int(left), 60)
         return True
 
     # ============================================================
