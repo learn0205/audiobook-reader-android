@@ -20,11 +20,23 @@ jobs:
         with:
           python-version: '3.11'
 
+      # ⚠️ 必须显式切到 JDK 17。
+      # 光 apt 装 openjdk-17-jdk 是不够的：runner 默认的 JAVA_HOME 仍指向 Java 11，
+      # 于是最后 Gradle 打包阶段会失败：
+      #   Failed to apply plugin 'com.android.internal.application'.
+      #   > Android Gradle plugin requires Java 17 to run. You are currently using Java 11.
+      # setup-java 会正确设置 JAVA_HOME 并把 java 放进 PATH。
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk autoconf automake libtool \
+            git zip unzip autoconf automake libtool \
             pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
             cmake libffi-dev libssl-dev libltdl-dev
 
@@ -56,7 +68,7 @@ jobs:
         if: failure()
         run: |
           echo "==================== 命中的错误行 ===================="
-          grep -nE "ERROR:|error:|Traceback|No matching distribution|not a supported wheel|ErrorReturnCode|FAILED:|No space left" buildozer.log | tail -40 || true
+          grep -nE "ERROR:|error:|Traceback|No matching distribution|not a supported wheel|ErrorReturnCode|FAILED:|No space left|What went wrong|gradlew failed|requires Java|Execution failed|Could not find a version" buildozer.log | tail -40 || true
           echo
           echo "==================== 日志最后 60 行 ===================="
           tail -60 buildozer.log || true
