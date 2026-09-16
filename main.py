@@ -256,8 +256,12 @@ class AudioBookApp(App):
         # 否则界面上完全看不出"点一段就能从那儿开始念"。
         body = FloatLayout()
         self._rv = RecycleView(viewclass=ParaView)
+        # ⚠️ 不要传 default_size=None —— default_size 是 ReferenceListProperty，
+        # 只接受 list/tuple，传 None 会抛
+        #   ValueError: RecycleBoxLayout.default_size must be a list or a tuple type
+        # 这一行曾经导致安卓上一启动就闪退。
         layout = RecycleBoxLayout(orientation="vertical", spacing=dp(1),
-                                  default_size=None, default_size_hint=(1, None),
+                                  default_size_hint=(1, None),
                                   size_hint_y=None)
         layout.bind(minimum_height=layout.setter("height"))
         self._rv.add_widget(layout)
@@ -1010,10 +1014,20 @@ class AudioBookApp(App):
         return True
 
     def on_stop(self):
-        self._save_position()
-        self._config.save()
+        """退出前保存断点与配置。
+
+        注意：build() 有可能中途失败（走崩溃屏分支），此时 _config / _engine
+        还是 None，这里必须容错，否则退出时会再抛一次异常。
+        """
         try:
-            self._engine.shutdown()
+            if self._config is not None:
+                self._save_position()
+                self._config.save()
+        except Exception:
+            pass
+        try:
+            if self._engine is not None:
+                self._engine.shutdown()
         except Exception:
             pass
 
