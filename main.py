@@ -762,6 +762,10 @@ class AudioBookApp(App):
                 index=g - cstart,              # 章内下标，不是全书下标
                 reader_font_size=self.reader_font,
             ))
+        # 换章后先把滚动位置顶到最上：否则会残留上一章居中时设的 scroll_y，
+        # 若新章内容比视口短，Kivy 会把内容贴到底部，上方留出一大片黑
+        # （用户看到的「黑色遮蔽层挡住文字」）。后面 _set_highlight 再按需居中。
+        self._scroll_to_top()
         self._set_highlight(global_index)
         self._update_hint()
         diag(f"[load] scroll_h={self._scroll.height} content_h="
@@ -842,6 +846,20 @@ class AudioBookApp(App):
         except Exception:
             pass
 
+    def _scroll_to_top(self):
+        """把正文滚到最顶部（scroll_y=1）。
+
+        `_setting_scroll` 用来告诉 `_on_scroll_y`「这是程序设的，不是用户手动翻页」，
+        否则会被误判成用户操作、把自动跟随关掉。
+        """
+        self._setting_scroll = True
+        try:
+            self._scroll.scroll_y = 1.0
+        except Exception:
+            pass
+        finally:
+            self._setting_scroll = False
+
     def _center_widget(self, widget):
         """把 widget 滚到正文视口的垂直正中（朗读跟随用）。
 
@@ -852,7 +870,13 @@ class AudioBookApp(App):
         content = self._text_box
         viewport_h = scroll.height
         content_h = content.height
-        if viewport_h <= 0 or content_h <= viewport_h:
+        if viewport_h <= 0:
+            return
+        if content_h <= viewport_h:
+            # 内容比视口短，本来不需要滚动；但如果 scroll_y 残留在 0
+            # （上一章居中时设过），内容会被贴在底部、上方留一大片黑。
+            # 这里强制顶到最上，保证正文从顶部开始显示。
+            self._scroll_to_top()
             return
         # widget.y 是相对内容(_text_box)的坐标。
         # 内容底边在视口中的位置 = scroll_y*(viewport_h-content_h)，
