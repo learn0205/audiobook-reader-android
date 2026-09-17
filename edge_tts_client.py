@@ -71,6 +71,77 @@ def _muid():
     return uuid.uuid4().hex.upper()
 
 
+def _make_ssl_context():
+    """构造一个「能找到 CA 证书」的 SSLContext。
+
+    ⚠️ 安卓上 Python 的 ssl 默认**一个 CA 都找不到**（certifi / OpenSSL 的默认
+    证书路径在 p4a 打包后都不存在），于是所有 HTTPS 请求都会报：
+        [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+    表现就是 Edge TTS 完全不可用（音色列表、合成都失败）。
+
+    这里显式加载安卓系统 CA 目录 `/system/etc/security/cacerts`——它是 OpenSSL
+    的 capath 格式（文件名即 subject hash），`load_verify_locations(capath=...)`
+    可以直接吃。再兜底试几个常见路径；万一还是拿不到 CA，才关闭校验以保证可用。
+    """
+    ctx = ssl.create_default_context()
+
+    def _has_ca():
+        try:
+            return bool(ctx.get_ca_certs())
+        except Exception:
+            return False
+
+    if not _has_ca():
+        # ① 先把安卓 CA 目录里的 PEM **拼成一个 bundle** 直接加载。
+        #    这样不依赖 OpenSSL 的 capath 命名规则（各版本 subject hash 算法不一致，
+        #    用 capath 可能静默加载不到任何证书）。
+        for d in ("/system/etc/security/cacerts",
+                  "/data/misc/user/0/cacerts-added"):
+            pems = _read_pem_bundle(d)
+            if pems:
+                try:
+                    ctx.load_verify_locations(cadata=pems)
+                except Exception:
+                    pass
+                if _has_ca():
+                    break
+
+    if not _has_ca():
+        # ② 再试标准 capath（桌面 / 部分 ROM 可用）
+        for capath in ("/etc/ssl/certs", "/etc/pki/tls/certs",
+                       "/system/etc/security/cacerts"):
+            try:
+                ctx.load_verify_locations(capath=capath)
+            except Exception:
+                continue
+            if _has_ca():
+                break
+
+    if not _has_ca():
+        # ③ 最后兜底：拿不到任何 CA 就只能关校验，否则功能彻底不可用
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _read_pem_bundle(directory):
+    """把目录下所有 PEM 证书拼成一个字符串（找不到就返回空串）。"""
+    try:
+        names = sorted(os.listdir(directory))
+    except Exception:
+        return ""
+    chunks = []
+    for name in names:
+        try:
+            with open(os.path.join(directory, name), "rb") as f:
+                data = f.read()
+        except Exception:
+            continue
+        if b"BEGIN CERTIFICATE" in data:
+            chunks.append(data.decode("ascii", "ignore"))
+    return "\n".join(chunks)
+
+
 def list_voices(retries=3):
     """返回可用音色（原始 dict 列表，含 ShortName / Gender / Locale / FriendlyName）。"""
     req = urllib.request.Request(_VOICES_URL, headers={
@@ -86,10 +157,11 @@ def list_voices(retries=3):
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "en-US,en;q=0.9",
     })
+    ctx = _make_ssl_context()          # 安卓上必须显式带上 CA，否则证书校验失败
     last_err = None
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
                 raw = resp.read()
             return json.loads(raw.decode("utf-8"))
         except Exception as e:
@@ -299,7 +371,7 @@ def synthesize(text, voice, rate="+0%", pitch="+0Hz", volume="+0%",
     last_err = None
     for attempt in range(retries + 1):
         try:
-            ctx = ssl.create_default_context()
+            ctx = _make_ssl_context()      # 安卓上必须显式带上 CA（见 _make_ssl_context）
             sock = socket.create_connection((_WS_HOST, _WS_PORT), timeout=timeout)
             ssock = ctx.wrap_socket(sock, server_hostname=_WS_HOST)
             try:
