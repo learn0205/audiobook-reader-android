@@ -38,9 +38,7 @@ from kivy.uix.button import Button
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
-from kivy.uix.recycleboxlayout import RecycleBoxLayout
-from kivy.uix.recycleview import RecycleView
-from kivy.uix.recycleview.views import RecycleDataViewBehavior
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
 
 from book_parser import BookParseError
@@ -71,30 +69,68 @@ else:                                        # 字体缺失时给个明确提示
 REQUEST_PICK_BOOK = 1001
 
 KV = """
+# ============================================================
+#  全局控件样式：统一圆角 + 扁平配色
+#  按钮底色统一由 background_color 决定（下面用 canvas 自己画圆角矩形），
+#  这样各处 new Button(background_color=...) 的写法不用改。
+# ============================================================
+<Button>:
+    background_normal: ''
+    background_down: ''
+    color: 0.90, 0.92, 0.95, 1
+    font_size: '14sp'
+    canvas.before:
+        Color:
+            rgba: self.background_color
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
+
+<Slider>:
+    # 滑块加大，手机上更好按
+    cursor_size: dp(24), dp(24)
+    cursor_image: ''
+
 <ParaView>:
     # 一段正文：点一下就从这段开始读；朗读中的那一段有底色。
     # 注意用 reader_font_size 而不是直接覆盖 font_size —— Label.font_size 自带
     # 'sp' 单位语义，重定义会破坏它。
     active: False
     font_size: str(int(root.reader_font_size)) + 'sp'
-    text_size: self.width - dp(20), None
+    text_size: self.width - dp(24), None
     size_hint_y: None
-    height: max(dp(30), self.texture_size[1] + dp(14))
+    height: max(dp(30), self.texture_size[1] + dp(16))
     halign: 'left'
     valign: 'top'
-    padding_x: dp(10)
+    padding_x: dp(12)
     canvas.before:
         Color:
             rgba: root.bg_color
         RoundedRectangle:
             pos: self.x + dp(2), self.y + dp(1)
             size: self.width - dp(4), self.height - dp(2)
-            radius: [dp(6)]
+            radius: [dp(8)]
 """
 
 
-class ParaView(RecycleDataViewBehavior, Label):
-    """正文里的一段。点一下 → 从这段开始朗读。"""
+# ---- 配色（深色主题）----
+C_BG = (0.09, 0.10, 0.12, 1)        # 页面背景
+C_SURFACE = (0.13, 0.15, 0.18, 1)   # 顶栏 / 弹窗
+C_BTN = (0.18, 0.21, 0.26, 1)       # 普通按钮
+C_PRIMARY = (0.23, 0.51, 0.96, 1)   # 主按钮（播放）
+C_DANGER = (0.50, 0.22, 0.24, 1)    # 危险按钮（清空书签）
+C_TEXT = (0.90, 0.92, 0.95, 1)      # 主文字
+C_DIM = (0.55, 0.60, 0.68, 1)       # 次要文字
+
+
+class ParaView(Label):
+    """正文里的一段。
+
+    注意：只用于**当前章节**（不是整本书）。整本 15 万段一次性渲染，
+    手机上必然错位卡死 —— 番茄小说也是按章加载的。
+    index 是**本章内**的下标；映射到全书下标由主窗口负责。
+    """
 
     active = BooleanProperty(False)
     index = NumericProperty(0)
@@ -175,7 +211,10 @@ class AudioBookApp(App):
         self._chapters = []
         self._dragging = False
         self._sleep_until = 0.0     # 定时休眠的截止时间戳（0 = 未启用）
-        self._rv = None
+        self._scroll = None         # 正文滚动区
+        self._text_box = None       # 正文容器（只装当前章节）
+        self._view_chapter = -1     # 当前渲染的是第几章（-1 = 未渲染）
+        self._view_start = 0        # 当前渲染的首段在全书中的下标
         self._status_popup = None
         self._voice_list = []       # 系统音色列表（引擎初始化后填充）
         self._shown_errors = set()  # 已提示过的错误，避免连续失败时刷屏
@@ -195,7 +234,6 @@ class AudioBookApp(App):
 
     def _build_crash_screen(self, tb_text):
         """把启动失败的 traceback 直接显示在屏幕上（可滚动、可截图）。"""
-        from kivy.uix.scrollview import ScrollView
         root = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(6))
         root.add_widget(Label(
             text="启动失败 — 请把本页截图发给开发者",
@@ -271,22 +309,21 @@ class AudioBookApp(App):
         top.add_widget(btn_set)
         root.add_widget(top)
 
-        # ---- 正文区（RecycleView 会做视图回收，几千段的长篇也不卡） ----
-        # 外面套一层 FloatLayout：没打开书的时候盖一张"操作说明"，
-        # 否则界面上完全看不出"点一段就能从那儿开始念"。
+        # ---- 正文区：只渲染「当前章节」 ----
+        # 整本书塞进一个列表是行不通的（本书 153242 段），会同时引发两个症状：
+        #   ① 布局尺寸算错 → 只看到章节标题、后面一片空白
+        #   ② refresh_from_data() 卡死主线程 → onDone 回调回不来
+        #      → 读完一段就停住，不再继续下一段
+        # 番茄小说也是按章加载的。单章中位 130 段、最多 400 段，
+        # 用普通控件即可，而且高度由 Kivy 自动算准
+        # （RecycleView 对「高度不定的文本条目」反而算不准）。
         body = FloatLayout()
-        self._rv = RecycleView(viewclass=ParaView)
-        # ⚠️ 不要传 default_size=None —— default_size 是 ReferenceListProperty，
-        # 只接受 list/tuple，传 None 会抛
-        #   ValueError: RecycleBoxLayout.default_size must be a list or a tuple type
-        # 这一行曾经导致安卓上一启动就闪退。
-        layout = RecycleBoxLayout(orientation="vertical", spacing=dp(1),
-                                  default_size_hint=(1, None),
-                                  size_hint_y=None)
-        layout.bind(minimum_height=layout.setter("height"))
-        self._rv.add_widget(layout)
-        self._rv.data = []
-        body.add_widget(self._rv)
+        self._scroll = self._make_scroll()
+        self._text_box = BoxLayout(orientation="vertical", size_hint_y=None,
+                                   spacing=dp(1), padding=[0, dp(6)])
+        self._text_box.bind(minimum_height=self._text_box.setter("height"))
+        self._scroll.add_widget(self._text_box)
+        body.add_widget(self._scroll)
 
         self.lbl_hint = Label(
             text="尚未打开书籍\n\n"
@@ -297,7 +334,7 @@ class AudioBookApp(App):
                  "· 顶部「目录」    →  按章节跳转朗读\n\n"
                  "（第一次打开书籍时会自动弹出提示）",
             halign="center", valign="middle", font_size="14sp",
-            color=(.55, .60, .68, 1))
+            color=C_DIM)
         self.lbl_hint.bind(
             size=lambda w, *_: setattr(w, "text_size", (w.width - dp(40), None)))
         body.add_widget(self.lbl_hint)
@@ -345,23 +382,29 @@ class AudioBookApp(App):
         prog_box.add_widget(self.lbl_progress)
         root.add_widget(prog_box)
 
-        # ---- 控制行 ----
-        ctrl = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(6),
-                         padding=[dp(8), dp(4)])
-        self.btn_prev = Button(text="上一段", background_normal="",
-                               background_color=(.30, .34, .40, 1), color=(1, 1, 1, 1),
-                               font_size="12sp")
-        self.btn_prev.bind(on_release=lambda *_: self.jump_paragraph(-1))
-        self.btn_play = Button(text="▶ 播放", background_normal="",
-                               background_color=(.18, .44, .93, 1), color=(1, 1, 1, 1),
-                               font_size="14sp")
+        # ---- 控制行：上一章 / 播放-暂停 / 下一章 ----
+        # 播放键按一下暂停、再按一下继续（不需要单独的停止键，
+        # 停止功能挪到「设置」里，主界面保持干净）。
+        ctrl = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(8),
+                         padding=[dp(12), dp(5)])
+        self.btn_prev_ch = Button(text="◀◀ 上一章",
+                                  background_color=C_BTN, color=C_TEXT,
+                                  font_size="13sp")
+        self.btn_prev_ch.bind(on_release=lambda *_: self.jump_chapter(-1))
+
+        self.btn_play = Button(text="▶ 播放",
+                               background_color=C_PRIMARY, color=(1, 1, 1, 1),
+                               font_size="15sp", bold=True)
         self.btn_play.bind(on_release=lambda *_: self.toggle_play())
-        self.btn_stop = Button(text="■", background_normal="",
-                               background_color=(.30, .34, .40, 1), color=(1, 1, 1, 1))
-        self.btn_stop.bind(on_release=lambda *_: self._engine.stop())
-        ctrl.add_widget(self.btn_prev)
+
+        self.btn_next_ch = Button(text="下一章 ▶▶",
+                                  background_color=C_BTN, color=C_TEXT,
+                                  font_size="13sp")
+        self.btn_next_ch.bind(on_release=lambda *_: self.jump_chapter(+1))
+
+        ctrl.add_widget(self.btn_prev_ch)
         ctrl.add_widget(self.btn_play)
-        ctrl.add_widget(self.btn_stop)
+        ctrl.add_widget(self.btn_next_ch)
         root.add_widget(ctrl)
         return root
 
@@ -526,7 +569,7 @@ class AudioBookApp(App):
         tips.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
         box.add_widget(tips)
         btn = Button(text="知道了", size_hint_y=None, height=dp(46),
-                     background_normal="", background_color=(.18, .44, .93, 1),
+                     background_normal="", background_color=C_PRIMARY,
                      color=(1, 1, 1, 1))
         btn.bind(on_release=lambda *_: popup.dismiss())
         box.add_widget(btn)
@@ -540,13 +583,37 @@ class AudioBookApp(App):
         else:
             self._toast("点右上角「打开」选择 txt / epub")
 
-    def _refresh_view(self):
-        """重建正文列表数据。"""
-        if self._rv is None:
+    def _refresh_view(self, global_index=None):
+        """渲染**当前章节**的正文（不是整本书）。
+
+        整本一次渲染会同时引发两个 bug（详见 _build_ui 里的注释）。
+        这里按章加载：单章中位 130 段，普通控件完全够用，
+        而且高度由 Kivy 自动算准。
+        """
+        if self._text_box is None or not self._paragraphs:
+            self._update_hint()
             return
-        self._rv.data = [{"text": p, "index": i, "reader_font_size": self.reader_font,
-                          "active": i == self.highlight_index}
-                         for i, p in enumerate(self._paragraphs)]
+        if global_index is None:
+            global_index = self._engine.get_position()[0]
+        ci, ctitle, cstart, cend = self._chapter_at(global_index)
+
+        # 同一章且已渲染过 → 不重建，只挪高亮。
+        # 朗读时每段都会走到这里，绝不能每段都重建控件。
+        if ci == self._view_chapter and self._text_box.children:
+            self._set_highlight(global_index)
+            return
+
+        self._view_chapter = ci
+        self._view_start = cstart
+        self.chapter_text = ctitle or ""
+        self._text_box.clear_widgets()
+        for g in range(cstart, cend + 1):
+            self._text_box.add_widget(ParaView(
+                text=self._paragraphs[g],
+                index=g - cstart,              # 章内下标，不是全书下标
+                reader_font_size=self.reader_font,
+            ))
+        self._set_highlight(global_index)
         self._update_hint()
 
     def _update_hint(self):
@@ -557,43 +624,64 @@ class AudioBookApp(App):
         self.lbl_hint.opacity = 1 if empty else 0
         self.lbl_hint.disabled = not empty
 
-    def _set_highlight(self, index):
-        """只更新高亮那一段，避免整本书重建视图。"""
-        self.highlight_index = index
-        data = self._rv.data
-        for i, item in enumerate(data):
-            item["active"] = (i == index)
-        self._rv.refresh_from_data()
-        self._scroll_to(index)
+    def _set_highlight(self, global_index):
+        """把朗读中的那一段标黄。
 
-    def _scroll_to(self, index):
-        """把朗读中的段落滚进视野（按比例估算，够用且稳定）。"""
-        total = len(self._paragraphs)
-        if total <= 1 or self._rv is None:
+        只遍历当前章节的控件（~130 个）。之前对 15 万条调
+        refresh_from_data()，直接卡死主线程，导致「读完一段就不动了」。
+        """
+        # 目标不在当前渲染的章节里（例如拖进度条/跳书签跨了章）→ 先换章。
+        # _refresh_view 内部会再调回本方法，此时章节已匹配，不会递归。
+        if self._chapter_at(global_index)[0] != self._view_chapter:
+            self._refresh_view(global_index)
             return
-        self._rv.scroll_y = max(0.0, min(1.0, 1.0 - index / float(total - 1)))
+
+        self.highlight_index = global_index
+        local = global_index - self._view_start
+        # children 是倒序的，反转回正序
+        for i, widget in enumerate(reversed(self._text_box.children)):
+            widget.active = (i == local)
+        self._scroll_to_local(local)
+
+    def _scroll_to_local(self, local_index):
+        """把本章内第 local_index 段滚进视野。"""
+        children = list(reversed(self._text_box.children))
+        if not (0 <= local_index < len(children)):
+            return
+        try:
+            self._scroll.scroll_to(children[local_index], padding=dp(90),
+                                   animate=False)
+        except Exception:
+            pass
 
     # ============================================================
     #                      播放控制
     # ============================================================
-    def tap_paragraph(self, index):
-        """点正文某一段 → 从这一段开始朗读。"""
+    def tap_paragraph(self, local_index):
+        """点正文某一段 → 从这一段开始朗读。
+
+        注意：local_index 是**本章内**的下标（ParaView 只渲染当前章节），
+        这里换算成全书下标再交给引擎。
+        """
         if not self._paragraphs:
             return
-        index = max(0, min(int(index), len(self._paragraphs) - 1))
+        index = max(0, min(self._view_start + int(local_index),
+                           len(self._paragraphs) - 1))
         self._engine.play(index)
         self._set_highlight(index)
-        self._toast(f"从第 {index + 1} 段开始朗读")
+        self._toast("从第 %d 段开始朗读" % (index + 1))
 
-    def long_press_paragraph(self, index):
+    def long_press_paragraph(self, local_index):
         """长按正文段落 → 弹出操作菜单（朗读 / 书签）。
 
         书签功能之前完全没接到界面上（config_manager 里的接口都白写了），
         长按是最自然的移动端入口。
+        local_index 是章内下标；书签按全书下标存，这里统一换算。
         """
         if not self._paragraphs:
             return
-        index = max(0, min(int(index), len(self._paragraphs) - 1))
+        index = max(0, min(self._view_start + int(local_index),
+                           len(self._paragraphs) - 1))
         has_bookmark = any(b.get("para") == index
                            for b in self._config.get_bookmarks(self._book_key))
 
@@ -603,7 +691,7 @@ class AudioBookApp(App):
 
         preview = Label(text=self._paragraphs[index][:70], font_size="12sp",
                         size_hint_y=None, height=dp(44), halign="left",
-                        valign="top", color=(.62, .67, .74, 1))
+                        valign="top", color=C_DIM)
         preview.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, w.height)))
         box.add_widget(preview)
 
@@ -678,7 +766,7 @@ class AudioBookApp(App):
             btn = Button(text="第 %d 段 · %s" % (para + 1, bookmark.get("label", "")),
                          size_hint_y=None, height=dp(46), halign="left",
                          valign="middle", background_normal="",
-                         background_color=(.24, .27, .32, 1), color=(1, 1, 1, 1),
+                         background_color=C_BTN, color=(1, 1, 1, 1),
                          font_size="13sp")
             btn.bind(size=lambda w, *_: setattr(w, "text_size",
                                                 (w.width - dp(20), None)))
@@ -689,7 +777,7 @@ class AudioBookApp(App):
 
         btn_clear = Button(text="清空本书书签", size_hint_y=None, height=dp(46),
                            background_normal="",
-                           background_color=(.55, .25, .25, 1), color=(1, 1, 1, 1))
+                           background_color=C_DANGER, color=(1, 1, 1, 1))
         def _clear(*_):
             popup.dismiss()
             self.clear_bookmarks()
@@ -726,6 +814,29 @@ class AudioBookApp(App):
         self._engine.seek_paragraph(target)
         self._set_highlight(target)
         self._save_position()
+
+    def jump_chapter(self, delta):
+        """跳到上一章 / 下一章的开头，并继续朗读。
+
+        听书场景里按章跳比按段跳实用得多（一章一百多段，
+        按段跳要按上百次才换一章）。
+        """
+        if not self._paragraphs:
+            return
+        if not self._chapters:
+            self._toast("本书没有识别到章节，无法按章跳转")
+            return
+        para_now = self._engine.get_position()[0]
+        ci, _ct, _cs, _ce = self._chapter_at(para_now)
+        target = max(0, min(ci + int(delta), len(self._chapters) - 1))
+        if target == ci:
+            self._toast("已经是%s了" % ("第一章" if delta < 0 else "最后一章"))
+            return
+        title, start = self._chapters[target]
+        self._engine.play(start)
+        self._set_highlight(start)
+        self._save_position()
+        self._toast("已跳到「%s」" % title[:18])
 
     def _slider_down(self, _slider, touch):
         if _slider.collide_point(*touch.pos):
@@ -820,7 +931,19 @@ class AudioBookApp(App):
         return "%02d:%02d" % (m, s)
 
     def _on_paragraph(self, index):
-        Clock.schedule_once(lambda _dt: self._set_highlight(index), 0)
+        """开始朗读某一段：跨章了就换章渲染，否则只挪高亮。
+
+        跨章必须重建控件（正文区只装当前章节）；同章内只挪高亮 ——
+        绝不能每段都重建或全量刷新，那会卡死主线程、让朗读直接停住。
+        """
+        def _apply(_dt):
+            if not self._paragraphs:
+                return
+            if self._chapter_at(index)[0] != self._view_chapter:
+                self._refresh_view(index)
+            else:
+                self._set_highlight(index)
+        Clock.schedule_once(_apply, 0)
 
     def _on_state(self, state):
         def _apply(_dt):
@@ -917,7 +1040,6 @@ class AudioBookApp(App):
         这里改成 bars+content 并加宽到 16dp（手指可点的尺寸），
         同时把颜色调亮一点，让用户知道这条能拖。
         """
-        from kivy.uix.scrollview import ScrollView
         return ScrollView(
             scroll_type=["bars", "content"],
             bar_width=dp(16),
@@ -941,7 +1063,7 @@ class AudioBookApp(App):
             btn = Button(text="%s    (第 %d 段)" % (title, start + 1),
                          size_hint_y=None, height=dp(44), halign="left",
                          valign="middle", background_normal="",
-                         background_color=(.24, .27, .32, 1), color=(1, 1, 1, 1),
+                         background_color=C_BTN, color=(1, 1, 1, 1),
                          font_size="13sp")
             btn.bind(size=lambda w, *_: setattr(w, "text_size", (w.width - dp(20), None)))
             btn.bind(on_release=lambda _b, s=start: self._goto_chapter(popup, s))
@@ -968,13 +1090,12 @@ class AudioBookApp(App):
         # ---- 音色 ----
         box.add_widget(Label(text="音色（来自系统 TTS 引擎）", size_hint_y=None,
                              height=dp(24), font_size="13sp"))
-        voice_names = [v["name"] for v in getattr(self, "_voice_list", [])]
         voice_labels = {v["label"]: v["name"] for v in getattr(self, "_voice_list", [])}
         current = str(self._config.get("voice_name", ""))
         current_label = next((lbl for lbl, n in voice_labels.items() if n == current), None)
         spinner = Spinner(text=current_label or (list(voice_labels)[0] if voice_labels else "无可用音色"),
                           values=list(voice_labels), size_hint_y=None, height=dp(44),
-                          background_normal="", background_color=(.24, .27, .32, 1),
+                          background_normal="", background_color=C_BTN,
                           color=(1, 1, 1, 1))
 
         def _pick_voice(_s, text):
@@ -1019,9 +1140,9 @@ class AudioBookApp(App):
         sleep_row.add_widget(Label(text="定时休眠（分钟）", font_size="13sp"))
         spin_sleep = Spinner(text="30", values=["15", "30", "45", "60", "90", "120"],
                              size_hint_x=None, width=dp(90), background_normal="",
-                             background_color=(.24, .27, .32, 1), color=(1, 1, 1, 1))
+                             background_color=C_BTN, color=(1, 1, 1, 1))
         btn_sleep = Button(text="启动", size_hint_x=None, width=dp(70),
-                           background_normal="", background_color=(.18, .44, .93, 1),
+                           background_normal="", background_color=C_PRIMARY,
                            color=(1, 1, 1, 1))
 
         def _start_sleep(*_):
@@ -1038,7 +1159,7 @@ class AudioBookApp(App):
         btn_sleep.bind(on_release=_start_sleep)
         btn_cancel_sleep = Button(text="取消", size_hint_x=None, width=dp(64),
                                   background_normal="",
-                                  background_color=(.30, .34, .40, 1),
+                                  background_color=C_BTN,
                                   color=(1, 1, 1, 1))
         btn_cancel_sleep.bind(on_release=_cancel_sleep)
         sleep_row.add_widget(spin_sleep)
@@ -1048,15 +1169,28 @@ class AudioBookApp(App):
 
         btn_help = Button(text="使用说明", size_hint_y=None, height=dp(44),
                           background_normal="",
-                          background_color=(.30, .34, .40, 1), color=(1, 1, 1, 1))
+                          background_color=C_BTN, color=(1, 1, 1, 1))
         def _show_help(*_):
             popup.dismiss()
             self.show_usage_hint()
         btn_help.bind(on_release=_show_help)
         box.add_widget(btn_help)
 
+        # 主界面去掉了停止键（播放键改成暂停/继续切换），
+        # 停止功能放这里，需要时还能用。
+        btn_stop = Button(text="停止朗读", size_hint_y=None, height=dp(44),
+                          background_normal="",
+                          background_color=C_BTN, color=C_TEXT)
+        def _do_stop(*_):
+            popup.dismiss()
+            self._engine.stop()
+            self._save_position()
+            self._toast("已停止朗读")
+        btn_stop.bind(on_release=_do_stop)
+        box.add_widget(btn_stop)
+
         btn_close = Button(text="关闭", size_hint_y=None, height=dp(46),
-                           background_normal="", background_color=(.18, .44, .93, 1),
+                           background_normal="", background_color=C_PRIMARY,
                            color=(1, 1, 1, 1))
         btn_close.bind(on_release=lambda *_: popup.dismiss())
         box.add_widget(btn_close)
@@ -1087,23 +1221,24 @@ class AudioBookApp(App):
         self._config.set("speed", speed)
 
     def _on_font(self, value):
-        """字号滑块：立即更新数据，但把重量级的视图重建**防抖**到停手之后。
+        """字号滑块：只记录，等停手后再重建正文（防抖）。
 
-        原来每动一下都 refresh_from_data()，在几万段的书上拖动会反复重建视图，
-        明显卡顿。现在改成 0.35 秒内的连续变化只刷新一次。
+        字号一变，每段高度都要重算，比较重；拖动过程中每动一下就重建会卡。
+        所以 0.35 秒内的连续变化只重建一次。
         """
         self.reader_font = float(value)
         self._config.set("font_size", int(value))
-        for item in self._rv.data:
-            item["reader_font_size"] = self.reader_font
         if self._font_event is not None:
             self._font_event.cancel()
         self._font_event = Clock.schedule_once(self._apply_font_refresh, 0.35)
 
     def _apply_font_refresh(self, *_):
         self._font_event = None
-        if self._rv is not None:
-            self._rv.refresh_from_data()
+        if not self._paragraphs:
+            return
+        # 字号变了、每段高度都变，直接整章重建（单章只有一百多段，很快）
+        self._view_chapter = -1
+        self._refresh_view()
 
     # ============================================================
     #                      退出
