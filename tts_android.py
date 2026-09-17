@@ -83,6 +83,27 @@ def split_sentences(text: str, max_len: int = 60) -> list:
     return out
 
 
+# 两类"高危字符"，都会让部分 TTS 引擎（实测 vivo 自带引擎）合成直接失败：
+#   ① 引号类：英文 " ' ` 、中文 “ ” ‘ ’ 、弯引号 „ ‟ 、西文书名号 « » ‹ ›
+#      ——引擎误按 SSML 的属性引号解析，引号不成对就报错
+#   ② XML 元字符：< > &
+#      ——引擎误按 XML 标签 / 实体解析
+# 典型症状就是「读到引号后面就再也读不下去」。中文朗读里这些符号本就不发音，
+# 统一换成空格对听感没有影响。
+_QUOTE_CHARS = re.compile(r"[\"'`“”‘’„‟«»‹›<>&]")
+
+
+def sanitize_for_tts(text: str) -> str:
+    """把容易被 TTS 引擎误解析的引号类字符替换为空格。
+
+    只清洗送给引擎的文本；原文仍保存在 _sentences 里，
+    因此字符进度与语速校准不受影响。
+    """
+    if not text:
+        return text
+    return _QUOTE_CHARS.sub(" ", text)
+
+
 class AndroidTTS:
     """安卓 TTS 播放器：逐句朗读，支持暂停/续读/跳段/语速/音调/音色/语调起伏。
 
@@ -124,6 +145,9 @@ class AndroidTTS:
         self._cps = BASE_CPS        # 倍速 1.0 下每秒朗读字数
         self._sent_started = 0.0    # 当前句子开始发声的时刻
         self._error_count = 0       # 朗读失败次数（用于收敛错误提示）
+        # 超时推进的余量系数。初始保守（2.0），确保不会吞掉没读完的内容；
+        # 一旦确认 isSpeaking() 不可信（连续靠超时推进），收紧到 1.3 改善体验。
+        self._timeout_factor = 2.0
 
         # ---- 当前句的推进状态（onDone 回调与轮询兜底共用） ----
         self._spoken_uid = None     # 正在等待读完的 utterance id
@@ -426,11 +450,21 @@ class AndroidTTS:
                 # 记下时刻：万一引擎没回调 onStart，也能用这里兜底计时
                 self._sent_started = time.time()
                 uid = "s%d" % self._index
-                self._speak_text(sentence, uid)
+                # 清洗引号等易被引擎误解析的字符后再送进引擎
+                self._speak_text(sanitize_for_tts(sentence), uid)
                 self._spoken_uid = uid      # 只有真正调用成功才记上
-        except Exception as err:
-            self.on_error(f"朗读调用失败：{err}")
-            self.stop()
+        except Exception:
+            # 单句失败不该中断整本书 —— 以前这里直接 stop()，
+            # 于是一句含特殊字符读失败，后面整本书就再也读不下去了。
+            # 改成跳过本句继续往下读；只有连续失败很多次（说明引擎真的
+            # 不可用了）才彻底停。提示语固定不带变量，方便上层去重防刷屏。
+            self._error_count += 1
+            self.on_error("有句子朗读失败，已自动跳过（多为特殊字符导致）")
+            self._spoken_uid = None
+            if self._error_count >= 10:
+                self.stop()
+            else:
+                self._advance()
 
     def poll_advance(self):
         """兜底推进：由主线程定时调用（不依赖任何 Java 回调）。
@@ -445,13 +479,32 @@ class AndroidTTS:
         try:
             speaking = bool(self._tts.isSpeaking())
         except Exception:
-            return
+            speaking = False
         if speaking:
             self._seen_speaking = True      # 确认它真的开始说过
             return
         if not self._seen_speaking:
-            return                          # 还没开始发声，再等等，别抢跑
+            # 引擎从头到尾没报告过"正在朗读"（部分引擎 isSpeaking 恒为 false，
+            # 或延迟很久才变 true）。这种情况不能一直干等，否则永远卡死。
+            # 退到第三层兜底：按预估时长超时后强制推进。
+            if time.time() - self._sent_started > self._sentence_timeout():
+                # 连续靠超时推进 = 确认 isSpeaking() 不可信，收紧余量减少干等
+                self._timeout_factor = 1.3
+                self._complete_current()
+            return
+        # 走到这里说明 isSpeaking() 正常报过 true 又变回 false，状态可信
+        self._timeout_factor = 2.0
         self._complete_current()
+
+    def _sentence_timeout(self):
+        """本句的超时上限（秒）：按字数和实测语速估算，再留足安全余量。
+
+        只在 isSpeaking() 完全不可信时才走到这里，因此宁可估长一点——
+        估长了最多是句间多停顿一会儿，估短了会吞掉没读完的内容。
+        """
+        cps = max(0.8, self._cps) * max(0.1, self._speed)   # 当前倍速下的字/秒
+        estimated = self._cur_chars / cps if cps > 0 else 0
+        return estimated * self._timeout_factor + 1.5   # 余量系数自适应 + 1.5 秒宽限
 
     def _complete_current(self):
         """当前句读完了：校准语速并推进（onDone 与轮询共用）。"""
@@ -459,6 +512,7 @@ class AndroidTTS:
             return
         self._spoken_uid = None
         self._seen_speaking = False
+        self._error_count = 0   # 成功读完一句，说明引擎是好的，清零连续失败计数
         self._note_cps(self._cur_chars, time.time() - self._sent_started)
         self._advance()
 
