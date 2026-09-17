@@ -1242,14 +1242,18 @@ class AudioBookApp(App):
             return
         try:
             _Handler = autoclass("android.os.Handler")
-            _Looper = autoclass("java.util.Looper")
+            # ⚠️ Looper 在 android.os 下，不是 java.util！
+            # 之前误写成 java.util.Looper → ClassNotFoundException → Handler 建不出来
+            # → 退回 Kivy 的 Clock → 熄屏后 Clock 停摆 → 只念一段。
+            _Looper = autoclass("android.os.Looper")
             self._handler = _Handler(_Looper.getMainLooper())
             self._tick_runnable = _TickRunnable(self._tick)
             self._tick_mode = "Handler"
         except Exception as e:
             self._handler = None
             self._tick_runnable = None
-            self._tick_mode = "Clock(Handler失败:%s)" % e
+            # 截断：异常信息（含长长的 DexPathList）会把自检面板撑爆、盖住其它控件
+            self._tick_mode = "Clock(Handler失败:%s)" % str(e)[:48]
 
     def _start_tick_loop(self):
         """启动独立后台线程：每 0.2 秒把 _tick 投递到主线程。
@@ -1653,6 +1657,8 @@ class AudioBookApp(App):
         _diag = Label(text=_diag_text, size_hint_y=None, height=dp(92),
                       font_size="11sp", color=C_DIM, halign="left", valign="top")
         _diag.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        # 高度随文字自适应：否则错误信息一长就会溢出、盖住下面的控件
+        _diag.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
         box.add_widget(_diag)
 
         # ---- 音色 ----
