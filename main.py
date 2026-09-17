@@ -393,13 +393,8 @@ class AudioBookApp(App):
     def _build_ui(self):
         """用 Python 拼布局（比 KV 更容易精确控制移动端尺寸）。"""
         root = BoxLayout(orientation="vertical")
-
-        # 给底部留出系统导航栏的高度（手势条 / 三键导航），否则最下面一排
-        # 播放按钮会被系统导航条压住、看起来像「按钮盖住了小说」。
-        # 没有导航栏或拿不到值时退化为 0，不影响布局。
-        _nav = self._nav_bar_dp()
-        if _nav > 0:
-            root.padding = [0, 0, 0, dp(_nav)]
+        # 系统导航栏高度（手势条/三键）：折算进最底排控制条，避免按钮被系统条压住
+        self._nav_dp = self._nav_bar_dp()
 
         # ---- 顶栏 ----
         top = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(5),
@@ -473,6 +468,9 @@ class AudioBookApp(App):
         # ---- 进度区（按章进度，参照番茄小说） ----
         prog_box = BoxLayout(orientation="vertical", size_hint_y=None,
                              height=dp(78), padding=[dp(10), 0])
+        # 不透明底色：个别设备上 ScrollView 不裁剪、正文会溢出到这两条区域，
+        # 从控件缝隙里透出来（看起来就是「进度条/按钮压住了字」）。加底色盖住。
+        self._paint_bg(prog_box, C_BG)
 
         # 第一行：当前章节名 + 定时休眠倒计时
         head_row = BoxLayout(size_hint_y=None, height=dp(20))
@@ -515,8 +513,12 @@ class AudioBookApp(App):
         # ---- 控制行：上一章 / 播放-暂停 / 下一章 ----
         # 播放键按一下暂停、再按一下继续（不需要单独的停止键，
         # 停止功能挪到「设置」里，主界面保持干净）。
-        ctrl = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(8),
-                         padding=[dp(12), dp(5)])
+        # 高度额外加上系统导航栏高度，把这一条一直铺到屏幕最底（不透明底色
+        # 才能盖住任何溢出），同时让按钮留在导航条上方、点得到。
+        _nav = getattr(self, "_nav_dp", 0)
+        ctrl = BoxLayout(size_hint_y=None, height=dp(58) + dp(_nav), spacing=dp(8),
+                         padding=[dp(12), dp(5), dp(12), dp(5) + dp(_nav)])
+        self._paint_bg(ctrl, C_BG)
         self.btn_prev_ch = Button(text="◀◀ 上一章",
                                   background_color=C_BTN, color=C_TEXT,
                                   font_size="13sp")
@@ -1287,6 +1289,22 @@ class AudioBookApp(App):
             except Exception:
                 pass
             self._wake_lock = None
+
+    @staticmethod
+    def _paint_bg(widget, color):
+        """给控件加一层不透明底色（随控件位置/尺寸自适应）。
+
+        为什么需要：个别安卓设备上 ScrollView 的裁剪（stencil）不生效，
+        正文内容会溢出到下方的进度区/按钮区，从控件之间的缝隙透出来，
+        看起来就是「进度条和按钮压住了字」。给底部这两条加不透明底色，
+        任何溢出都会被盖住。
+        """
+        from kivy.graphics import Color, Rectangle
+        with widget.canvas.before:
+            Color(*color)
+            rect = Rectangle(pos=widget.pos, size=widget.size)
+        widget.bind(pos=lambda w, v: setattr(rect, "pos", v),
+                    size=lambda w, v: setattr(rect, "size", v))
 
     @staticmethod
     def _nav_bar_dp():

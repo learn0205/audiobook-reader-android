@@ -84,14 +84,21 @@ p4a.branch = develop
 # 不需要任何存储权限：
 # 导入书籍走系统的 SAF 文件选择器（ACTION_OPEN_DOCUMENT），
 # 选中的文件会被复制进应用私有目录，因此不必申请 READ_EXTERNAL_STORAGE。
-# 但需要 INTERNET —— 微软 Edge 在线 TTS 是云端合成，必须联网。
-android.permissions = INTERNET
+# 权限说明：
+#   INTERNET  —— 微软 Edge 在线 TTS 是云端合成，必须联网
+#   WAKE_LOCK —— 熄屏后保持 CPU 唤醒，朗读才不会被系统睡眠打断。
+#               ⚠️ 必须显式声明：少了它，wakelock 申请会**静默失败**，
+#               熄屏后 CPU 一睡，朗读立刻停（这正是「熄屏后只念一段」的元凶之一）。
+android.permissions = INTERNET, WAKE_LOCK
 
 # CI 上必须自动接受 SDK 许可协议
 android.accept_sdk_license = True
 
 android.allow_backup = True
-android.wakelock = True
+# ⚠️ 必须 False：这个开关的含义是「屏幕常亮」，听书时反而要让屏幕能正常熄掉。
+# 我们要的是「熄屏后 CPU 不睡」——由代码在播放时申请 PARTIAL_WAKE_LOCK 实现
+# （见 main.py 的 _acquire_wake / _release_wake），屏幕可正常关闭。
+android.wakelock = False
 
 # 日志：出问题时用 adb logcat 看输出
 android.logcat_filters = *:S python:D
