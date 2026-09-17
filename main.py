@@ -136,6 +136,11 @@ C_DANGER = (0.50, 0.22, 0.24, 1)    # 危险按钮（清空书签）
 C_TEXT = (0.90, 0.92, 0.95, 1)      # 主文字
 C_DIM = (0.55, 0.60, 0.68, 1)       # 次要文字
 
+# 用户自己翻过之后，暂停「朗读自动跟随」的秒数。
+# 没有这个缓冲，朗读每换一段就把视图拽回高亮处，
+# 表现就是右侧滑块拖不动、刚拖走又跳回原处。
+AUTO_FOLLOW_PAUSE = 6.0
+
 
 class ParaView(Label):
     """正文里的一段。
@@ -240,6 +245,8 @@ class AudioBookApp(App):
         self._dragging = False
         self._sleep_until = 0.0     # 定时休眠的截止时间戳（0 = 未启用）
         self._scroll = None         # 正文滚动区
+        self._last_user_scroll = 0.0    # 用户最后一次自己翻页的时刻
+        self._setting_scroll = False    # True=当前是程序在设置 scroll_y
         self._text_box = None       # 正文容器（只装当前章节）
         self._view_chapter = -1     # 当前渲染的是第几章（-1 = 未渲染）
         self._view_start = 0        # 当前渲染的首段在全书中的下标
@@ -359,6 +366,7 @@ class AudioBookApp(App):
         self._text_box.bind(minimum_height=self._text_box.setter("height"))
         self._scroll.add_widget(self._text_box)
         body.add_widget(self._scroll)
+        self._scroll.bind(scroll_y=self._on_scroll_y)
 
         self.lbl_hint = Label(
             text="尚未打开书籍\n\n"
@@ -678,16 +686,55 @@ class AudioBookApp(App):
             widget.active = (i == local)
         self._scroll_to_local(local)
 
-    def _scroll_to_local(self, local_index):
-        """把本章内第 local_index 段滚进视野。"""
+    def _on_scroll_y(self, *_):
+        """滚动位置变了：只要不是程序自己设的，就认定是用户在手动翻。
+
+        这样拖正文和拖右侧滑块都能被识别——两者的共同结果都是 scroll_y
+        发生了变化，比去拦截触摸事件可靠得多。
+        """
+        if self._setting_scroll:
+            return
+        self._last_user_scroll = time.time()
+
+    def _scroll_to_local(self, local_index, force=False):
+        """把本章内第 local_index 段滚到**视口正中**。
+
+        force=True 时无视「用户刚手动翻过」的限制（用户主动点了某一段时用）。
+        """
         children = list(reversed(self._text_box.children))
         if not (0 <= local_index < len(children)):
             return
+        # 用户刚自己翻过 → 别把他的位置抢回去，等他看完再跟
+        if not force and (time.time() - self._last_user_scroll
+                          < AUTO_FOLLOW_PAUSE):
+            return
         try:
-            self._scroll.scroll_to(children[local_index], padding=dp(90),
-                                   animate=False)
+            self._center_widget(children[local_index])
         except Exception:
             pass
+
+    def _center_widget(self, widget):
+        """把 widget 滚到正文视口的垂直正中（朗读跟随用）。
+
+        Kivy 自带的 scroll_to() 只保证「滚进视野」，不保证居中，
+        所以这里直接按内容坐标换算 scroll_y。
+        """
+        scroll = self._scroll
+        content = self._text_box
+        viewport_h = scroll.height
+        content_h = content.height
+        if viewport_h <= 0 or content_h <= viewport_h:
+            return
+        # widget.y 是相对内容(_text_box)的坐标。
+        # 内容底边在视口中的位置 = scroll_y*(viewport_h-content_h)，
+        # 令「widget 中心」落在视口中心即可解出 scroll_y。
+        target = ((viewport_h / 2.0 - widget.y - widget.height / 2.0)
+                  / (viewport_h - content_h))
+        self._setting_scroll = True
+        try:
+            scroll.scroll_y = max(0.0, min(1.0, target))
+        finally:
+            self._setting_scroll = False
 
     # ============================================================
     #                      播放控制
@@ -1067,7 +1114,6 @@ class AudioBookApp(App):
                 pass
             self._status_popup = None
 
-    @staticmethod
     @staticmethod
     def _scroll_kwargs():
         """滚动条设置 —— ScrollView 和 RecycleView 都用这套。

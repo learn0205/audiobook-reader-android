@@ -40,7 +40,16 @@ STATE_PLAYING = "playing"
 STATE_PAUSED = "paused"
 
 # 句末标点：用于把段落切成"逐句朗读"的单位（标点保留在句尾）
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?…；;])")
+# 句末标点：用于把段落切成"逐句朗读"的单位（标点保留在句尾）
+#
+# 这里**捕获**连续标点作为切分点，split 之后再把标点并回前一句，
+# 于是"……"整段留在前一句末尾，不会被切成只含省略号的碎片句
+# （那种碎片句要占满一个朗读周期却几乎不出声，听感就是停顿特别久）。
+#
+# ⚠️ 不能写成后顾断言 (?<=[。！？]+)：Python 的 re 要求 look-behind
+#    宽度固定，带 + 会在**导入时**直接报
+#      look-behind requires fixed-width pattern
+_SENTENCE_SPLIT_RE = re.compile(r"([。！？!?…；;]+)")
 
 # 音调倍率的可调范围（用户滑块 -10~+10 映射到这里）
 PITCH_MIN = 0.70
@@ -70,7 +79,18 @@ _CPS_ALPHA = 0.25              # 新样本权重：越大跟得越快、越不�
 
 def split_sentences(text: str, max_len: int = 60) -> list:
     """把一段文本切成句子列表；过长的句子再按最大长度硬切。"""
-    pieces = [p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
+    # split 带捕获组 → [文本, 标点, 文本, 标点, ..., 文本]，把标点并回前一句
+    parts = _SENTENCE_SPLIT_RE.split(text)
+    pieces = []
+    for i in range(0, len(parts) - 1, 2):
+        pieces.append(parts[i] + parts[i + 1])
+    tail = parts[-1] if parts else ""
+    if tail:
+        pieces.append(tail)
+    pieces = [p for p in pieces if p.strip()]
+    # 兜底：丢掉只剩标点/引号的碎片句（占满一个朗读周期却几乎不出声）
+    pieces = [p for p in pieces
+              if p.strip("。！？!?…；;“”‘’「」『』《》〈〉")]
     if not pieces:
         return [text] if text.strip() else []
     out = []
