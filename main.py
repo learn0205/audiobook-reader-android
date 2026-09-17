@@ -50,6 +50,42 @@ from config_manager import ConfigManager
 from tts_android import STATE_PAUSED, STATE_PLAYING
 from tts_engine import ReaderTTS
 
+# ---- jnius（仅安卓打包后存在）：用主线程 Handler 驱动朗读推进兜底，
+#      以及播放时持有 PARTIAL_WAKE_LOCK（熄屏也能继续念） ----
+import threading
+try:
+    from jnius import autoclass, PythonJavaClass, java_method
+    _JNIUS_OK = True
+except Exception:
+    autoclass = None
+    PythonJavaClass = object
+    java_method = None
+    _JNIUS_OK = False
+
+if _JNIUS_OK:
+    class _TickRunnable(PythonJavaClass):
+        """把 _tick 投递到安卓主线程执行。
+
+        关屏后 Kivy 的逐帧时钟会停摆，但安卓主线程的 Looper 照常运转，
+        所以走 Handler.post 才能保证「读完一句自动续下一句」在熄屏时也生效。
+        """
+        __javainterfaces__ = ["java/lang/Runnable"]
+        __javacontext__ = "app"
+
+        def __init__(self, cb):
+            super().__init__()
+            self.cb = cb
+
+        @java_method("()V")
+        def run(self):
+            try:
+                self.cb()
+            except Exception:
+                pass
+else:
+    class _TickRunnable(object):
+        pass
+
 # ---- 调试：把关键触摸/滚动事件写进文件（Android 上 print 不一定进 logcat，
 #      文件最可靠；正式发布前去掉 diag() 调用即可）。
 _DIAG = {"path": None}
@@ -275,6 +311,15 @@ class AudioBookApp(App):
         self._shown_errors = set()  # 已提示过的错误，避免连续失败时刷屏
         self._font_event = None     # 字号刷新防抖用
 
+        # ---- 朗读推进兜底时钟（独立于 Kivy 逐帧时钟，熄屏也能跑） ----
+        self._tick_running = False
+        self._tick_thread = None
+        self._handler = None
+        self._tick_runnable = None
+        # ---- 播放时的 PARTIAL_WAKE_LOCK（熄屏后 CPU 不睡，朗读不断） ----
+        self._wake_lock = None
+        self._wake_lock_tag = "AudioBookReader::play"
+
     # ============================================================
     #                        启动
     # ============================================================
@@ -338,13 +383,23 @@ class AudioBookApp(App):
         # 自动恢复上次的书；并轮询刷新进度
         Clock.schedule_once(self._restore_last_book, 0.6)
         # 0.2 秒一次：_tick 里除了刷进度，还负责「朗读推进兜底」
-        # （轮询 isSpeaking，不依赖安卓的 onDone 回调）
-        Clock.schedule_interval(self._tick, 0.2)
+        # （轮询 isSpeaking，不依赖安卓的 onDone 回调）。
+        # 关键：用独立后台线程 + 安卓主线程 Handler 驱动，**不**依赖 Kivy 的逐帧时钟——
+        # 因为熄屏后 Kivy 的帧时钟会停摆，导致「读完一句就卡住、不再续读」。
+        self._setup_tick_loop()
+        self._start_tick_loop()
         return root
 
     def _build_ui(self):
         """用 Python 拼布局（比 KV 更容易精确控制移动端尺寸）。"""
         root = BoxLayout(orientation="vertical")
+
+        # 给底部留出系统导航栏的高度（手势条 / 三键导航），否则最下面一排
+        # 播放按钮会被系统导航条压住、看起来像「按钮盖住了小说」。
+        # 没有导航栏或拿不到值时退化为 0，不影响布局。
+        _nav = self._nav_bar_dp()
+        if _nav > 0:
+            root.padding = [0, 0, 0, dp(_nav)]
 
         # ---- 顶栏 ----
         top = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(5),
@@ -387,11 +442,11 @@ class AudioBookApp(App):
         # 番茄小说也是按章加载的。单章中位 130 段、最多 400 段，
         # 用普通控件即可，而且高度由 Kivy 自动算准
         # （RecycleView 对「高度不定的文本条目」反而算不准）。
-        body = FloatLayout()
+        body = FloatLayout(size_hint_y=1)
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
         self._scroll = self._make_scroll()
         self._text_box = BoxLayout(orientation="vertical", size_hint_y=None,
-                                   spacing=dp(1), padding=[0, dp(6)])
+                                   spacing=dp(1), padding=[0, dp(6), 0, dp(12)])
         self._text_box.bind(minimum_height=self._text_box.setter("height"))
         self._scroll.add_widget(self._text_box)
         body.add_widget(self._scroll)
@@ -1088,6 +1143,13 @@ class AudioBookApp(App):
         Clock.schedule_once(_apply, 0)
 
     def _on_state(self, state):
+        # 播放时持有 PARTIAL_WAKE_LOCK（熄屏后 CPU 不睡，朗读不断）；
+        # 非播放态释放，避免一直耗电。
+        if state == STATE_PLAYING:
+            self._acquire_wake()
+        else:
+            self._release_wake()
+
         def _apply(_dt):
             self.play_label = "‖ 暂停" if state == STATE_PLAYING else "▶ 播放"
             # 界面可能还没建好（引擎初始化回调早于 build 完成）
@@ -1148,6 +1210,104 @@ class AudioBookApp(App):
             else:
                 self.sleep_text = "剩余 %02d:%02d" % divmod(int(left), 60)
         return True
+
+    # ============================================================
+    #  朗读推进兜底时钟：独立于 Kivy 逐帧时钟（熄屏也能跑）
+    # ============================================================
+    def _setup_tick_loop(self):
+        """准备安卓主线程 Handler（用于把 _tick 投递回主线程执行 Java 调用）。"""
+        if not _JNIUS_OK:
+            return
+        try:
+            _Handler = autoclass("android.os.Handler")
+            _Looper = autoclass("java.util.Looper")
+            self._handler = _Handler(_Looper.getMainLooper())
+            self._tick_runnable = _TickRunnable(self._tick)
+        except Exception:
+            self._handler = None
+            self._tick_runnable = None
+
+    def _start_tick_loop(self):
+        """启动独立后台线程：每 0.2 秒把 _tick 投递到主线程。
+
+        之所以要独立线程而不是 Kivy 的 Clock.schedule_interval：
+        熄屏后 Kivy 的帧时钟会停摆，poll_advance 不再被调用 → 读完一句就卡住。
+        后台 Python 线程不受屏幕状态影响，每次唤醒后通过 Handler.post 到主线程
+        执行 _tick（主线程才能安全调用安卓 TTS / MediaPlayer 等 Java 方法）。
+        """
+        if self._tick_running:
+            return
+        self._tick_running = True
+        app = self
+
+        def _loop():
+            while app._tick_running:
+                time.sleep(0.2)
+                if not app._tick_running:
+                    break
+                app._post_tick()
+
+        self._tick_thread = threading.Thread(target=_loop, daemon=True)
+        self._tick_thread.start()
+
+    def _post_tick(self):
+        """把 _tick 投到主线程；桌面无 Handler 时退回 Kivy Clock。"""
+        if self._handler is not None and self._tick_runnable is not None:
+            try:
+                self._handler.post(self._tick_runnable)
+                return
+            except Exception:
+                pass
+        # 桌面环境兜底：仍用 Kivy 时钟验证逻辑
+        Clock.schedule_once(lambda dt: self._tick())
+
+    def _stop_tick_loop(self):
+        self._tick_running = False
+
+    # ---- 播放时持有 PARTIAL_WAKE_LOCK：熄屏后 CPU 不睡，朗读不断 ----
+    def _acquire_wake(self):
+        if not _JNIUS_OK or self._wake_lock is not None:
+            return
+        try:
+            Context = autoclass("android.content.Context")
+            PowerManager = autoclass("android.os.PowerManager")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            pm = activity.getSystemService(Context.POWER_SERVICE)
+            self._wake_lock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK, self._wake_lock_tag)
+            self._wake_lock.acquire()
+        except Exception:
+            self._wake_lock = None
+
+    def _release_wake(self):
+        if self._wake_lock is not None:
+            try:
+                if self._wake_lock.isHeld():
+                    self._wake_lock.release()
+            except Exception:
+                pass
+            self._wake_lock = None
+
+    @staticmethod
+    def _nav_bar_dp():
+        """安卓系统导航栏高度（dp）：手势条 / 三键导航都会压住应用底部。
+
+        拿不到或没导航栏时返回 0，不影响布局。
+        """
+        if not _JNIUS_OK:
+            return 0
+        try:
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            res = activity.getResources()
+            rid = res.getIdentifier("navigation_bar_height", "dimen", "android")
+            if rid > 0:
+                h = res.getDimensionPixelSize(rid)
+                density = res.getDisplayMetrics().density
+                if density:
+                    return int(round(h / density))
+        except Exception:
+            pass
+        return 0
 
     # ============================================================
     #                      弹窗
@@ -1509,6 +1669,12 @@ class AudioBookApp(App):
         try:
             if self._engine is not None:
                 self._engine.shutdown()
+        except Exception:
+            pass
+        # 关掉兜底时钟线程、释放 wakelock，避免退出后还在空转耗电
+        try:
+            self._stop_tick_loop()
+            self._release_wake()
         except Exception:
             pass
 
