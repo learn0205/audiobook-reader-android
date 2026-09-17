@@ -325,6 +325,10 @@ class AudioBookApp(App):
         self.bind(book_title=lambda _i, v: setattr(self.lbl_title, "text", v))
         btn_bm = _top_btn("书签")
         btn_bm.bind(on_release=lambda *_: self.show_bookmarks())
+        # 字号调节入口。设置面板里虽然也有滑块，但藏在最下面不好找，
+        # 滑块也不容易精确点到某个值 —— 这里给个一眼能看到的大按钮面板。
+        btn_font = _top_btn("Aa", color=(.26, .31, .40, 1), width=42)
+        btn_font.bind(on_release=lambda *_: self.show_font_popup())
         btn_open = _top_btn("打开")
         btn_open.bind(on_release=lambda *_: self.pick_file())
         btn_set = _top_btn("设置", color=C_PRIMARY)
@@ -332,6 +336,7 @@ class AudioBookApp(App):
         top.add_widget(btn_toc)
         top.add_widget(self.lbl_title)
         top.add_widget(btn_bm)
+        top.add_widget(btn_font)
         top.add_widget(btn_open)
         top.add_widget(btn_set)
         root.add_widget(top)
@@ -1128,6 +1133,52 @@ class AudioBookApp(App):
         self._set_highlight(start)
         self._save_position()
         self._toast("从「%s」开始朗读" % title[:18])
+
+    def show_font_popup(self):
+        """字体大小调节面板：A- / A+ 大按钮 + 实时预览。
+
+        设置面板里也有字号滑块，但藏在最下面不好找，滑块也不容易
+        精确点到某个值。这里给一组直观的大按钮，改完立刻能在预览里看到。
+        """
+        popup = Popup(title="字体大小", size_hint=(0.88, None), height=dp(310))
+        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
+
+        value_lbl = Label(text="%d 号" % int(self.reader_font),
+                          font_size="24sp", color=C_TEXT, bold=True,
+                          size_hint_y=None, height=dp(38))
+
+        preview = Label(text="字体预览：星痕之门，入者皆成神。",
+                        font_size="%dsp" % int(self.reader_font),
+                        color=C_DIM, halign="center", valign="middle",
+                        size_hint_y=None, height=dp(64))
+        preview.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+
+        def apply_delta(delta):
+            size = max(10, min(30, int(self.reader_font) + delta))
+            self._on_font(size)
+            value_lbl.text = "%d 号" % size
+            preview.font_size = "%dsp" % size
+
+        row = BoxLayout(size_hint_y=None, height=dp(64), spacing=dp(12))
+        btn_minus = Button(text="A-", background_color=C_BTN, color=C_TEXT,
+                           font_size="22sp", bold=True)
+        btn_minus.bind(on_release=lambda *_: apply_delta(-1))
+        btn_plus = Button(text="A+", background_color=C_PRIMARY,
+                          color=(1, 1, 1, 1), font_size="22sp", bold=True)
+        btn_plus.bind(on_release=lambda *_: apply_delta(+1))
+        row.add_widget(btn_minus)
+        row.add_widget(btn_plus)
+
+        btn_done = Button(text="完成", size_hint_y=None, height=dp(46),
+                          background_color=C_PRIMARY, color=(1, 1, 1, 1))
+        btn_done.bind(on_release=lambda *_: popup.dismiss())
+
+        box.add_widget(value_lbl)
+        box.add_widget(preview)
+        box.add_widget(row)
+        box.add_widget(btn_done)
+        popup.content = box
+        popup.open()
 
     def show_settings(self):
         """设置面板：音色 / 音调 / 语速 / 语调起伏 / 字号 / 定时休眠。"""
