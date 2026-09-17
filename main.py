@@ -262,6 +262,9 @@ class AudioBookApp(App):
         self._scroll = None         # 正文滚动区
         self._last_user_scroll = 0.0    # 用户最后一次自己翻页的时刻
         self._setting_scroll = False    # True=当前是程序在设置 scroll_y
+        self._follow = True             # 朗读时是否把高亮段滚到正中；
+                                        # 用户一旦手动翻页就置 False，交还自由浏览，
+                                        # 直到再次点段落/播放/跳章才恢复跟随
         self._text_box = None       # 正文容器（只装当前章节）
         self._view_chapter = -1     # 当前渲染的是第几章（-1 = 未渲染）
         self._view_start = 0        # 当前渲染的首段在全书中的下标
@@ -649,6 +652,7 @@ class AudioBookApp(App):
     def _restore_last_book(self, *_):
         last = str(self._config.get("last_book", ""))
         if last and os.path.isfile(last):
+            self._follow = True
             self.open_book(last)
         else:
             self._toast("点右上角「打开」选择 txt / epub")
@@ -741,7 +745,9 @@ class AudioBookApp(App):
         diag(f"[scroll_y] {self._scroll.scroll_y:.3f} programmatic={self._setting_scroll}")
         if self._setting_scroll:
             return
+        # 用户自己翻页了 → 暂停自动跟随，把控制权交还用户
         self._last_user_scroll = time.time()
+        self._follow = False
 
     def _scroll_to_local(self, local_index, force=False):
         """把本章内第 local_index 段滚到**视口正中**。
@@ -751,8 +757,9 @@ class AudioBookApp(App):
         children = list(reversed(self._text_box.children))
         if not (0 <= local_index < len(children)):
             return
-        # 用户刚自己翻过 → 别把他的位置抢回去，等他看完再跟
-        if not force and (time.time() - self._last_user_scroll
+        # 用户手动翻过（或已关闭跟随）→ 别把他的位置抢回去，自由浏览
+        if not force and (not self._follow
+                          or time.time() - self._last_user_scroll
                           < AUTO_FOLLOW_PAUSE):
             return
         try:
@@ -796,6 +803,7 @@ class AudioBookApp(App):
             return
         index = max(0, min(self._view_start + int(local_index),
                            len(self._paragraphs) - 1))
+        self._follow = True          # 点段落开始朗读 → 恢复「高亮跟随」
         self._engine.play(index)
         self._set_highlight(index)
         self._toast("从第 %d 段开始朗读" % (index + 1))
@@ -930,8 +938,10 @@ class AudioBookApp(App):
         if state == STATE_PLAYING:
             self._engine.pause()
         elif state == STATE_PAUSED:
+            self._follow = True       # 继续播放 → 恢复「高亮跟随」
             self._engine.resume()
         else:
+            self._follow = True
             para, _, _ = self._engine.get_position()
             self._engine.play(para)
 
@@ -962,6 +972,7 @@ class AudioBookApp(App):
             self._toast("已经是%s了" % ("第一章" if delta < 0 else "最后一章"))
             return
         title, start = self._chapters[target]
+        self._follow = True          # 跳章并开始朗读 → 恢复「高亮跟随」
         self._engine.play(start)
         self._set_highlight(start)
         self._save_position()
@@ -1243,6 +1254,7 @@ class AudioBookApp(App):
             except Exception:
                 pass
             self._chapter_popup = None
+        self._follow = True          # 目录跳章并开始朗读 → 恢复「高亮跟随」
         self._engine.play(start)
         self._set_highlight(start)
         self._save_position()
