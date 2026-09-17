@@ -50,6 +50,14 @@ from config_manager import ConfigManager
 from tts_android import STATE_PAUSED, STATE_PLAYING
 from tts_engine import ReaderTTS
 
+# ---- 构建标识（CI 打包时由 .github/workflows/build-apk.yml 写入）----
+# 目的是让「手机上装的是哪一版」一目了然，排查问题时不用靠猜。
+try:
+    from build_info import SHORT as _BI_SHORT, DATE as _BI_DATE
+    BUILD_TAG = "%s · %s" % (_BI_SHORT, _BI_DATE)
+except Exception:
+    BUILD_TAG = "dev"
+
 # ---- jnius（仅安卓打包后存在）：用主线程 Handler 驱动朗读推进兜底，
 #      以及播放时持有 PARTIAL_WAKE_LOCK（熄屏也能继续念） ----
 import threading
@@ -319,12 +327,16 @@ class AudioBookApp(App):
         # ---- 播放时的 PARTIAL_WAKE_LOCK（熄屏后 CPU 不睡，朗读不断） ----
         self._wake_lock = None
         self._wake_lock_tag = "AudioBookReader::play"
+        # ---- 自检信息（显示在设置面板里，方便无 adb 时截图定位）----
+        self._tick_count = 0        # _tick 累计执行次数
+        self._tick_mode = "未启动"   # Handler / Clock / 未启动
+        self._wake_error = ""       # wakelock 申请失败原因
 
     # ============================================================
     #                        启动
     # ============================================================
     def build(self):
-        self.title = "有声书朗读"
+        self.title = "有声书朗读 " + BUILD_TAG
         # 启动阶段的任何异常都渲染到屏幕上。
         # 安卓上普通用户拿不到 logcat，这是唯一能让用户把真实报错反馈回来的办法。
         try:
@@ -1195,6 +1207,7 @@ class AudioBookApp(App):
         # ★ 朗读推进的兜底：不依赖安卓的 onDone 回调。
         #   有设备上 onDone 根本不触发，只靠它就会「读完一句卡住不动」。
         #   这里用 isSpeaking() 轮询，0.2 秒一次，最多多等 0.2 秒。
+        self._tick_count += 1
         self._engine.poll_advance()
 
         if self._engine.get_state() == STATE_PLAYING:
@@ -1219,15 +1232,18 @@ class AudioBookApp(App):
     def _setup_tick_loop(self):
         """准备安卓主线程 Handler（用于把 _tick 投递回主线程执行 Java 调用）。"""
         if not _JNIUS_OK:
+            self._tick_mode = "Clock(桌面)"
             return
         try:
             _Handler = autoclass("android.os.Handler")
             _Looper = autoclass("java.util.Looper")
             self._handler = _Handler(_Looper.getMainLooper())
             self._tick_runnable = _TickRunnable(self._tick)
-        except Exception:
+            self._tick_mode = "Handler"
+        except Exception as e:
             self._handler = None
             self._tick_runnable = None
+            self._tick_mode = "Clock(Handler失败:%s)" % e
 
     def _start_tick_loop(self):
         """启动独立后台线程：每 0.2 秒把 _tick 投递到主线程。
@@ -1278,8 +1294,10 @@ class AudioBookApp(App):
             self._wake_lock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK, self._wake_lock_tag)
             self._wake_lock.acquire()
-        except Exception:
+            self._wake_error = ""
+        except Exception as e:
             self._wake_lock = None
+            self._wake_error = str(e)
 
     def _release_wake(self):
         if self._wake_lock is not None:
@@ -1493,6 +1511,23 @@ class AudioBookApp(App):
 
         popup = Popup(title="设置", size_hint=(0.92, 0.88))
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
+
+        # 自检信息：无 adb 时让用户截图即可定位（装的是哪版 / 推进是否在跑 / 唤醒锁是否生效）
+        _eng_state = self._engine.get_state() if self._engine is not None else "-"
+        _diag_text = (
+            "版本 %s\n"
+            "推进 %s   tick=%d\n"
+            "唤醒锁 %s%s\n"
+            "引擎 %s"
+            % (BUILD_TAG, self._tick_mode, self._tick_count,
+               "已持有" if self._wake_lock is not None else "未持有",
+               ("  " + self._wake_error) if self._wake_error else "",
+               _eng_state)
+        )
+        _diag = Label(text=_diag_text, size_hint_y=None, height=dp(74),
+                      font_size="11sp", color=C_DIM, halign="left", valign="top")
+        _diag.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        box.add_widget(_diag)
 
         # ---- 音色 ----
         box.add_widget(Label(text="音色（系统引擎 + Edge 在线）", size_hint_y=None,

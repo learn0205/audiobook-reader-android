@@ -56,6 +56,15 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
+      # 把本次构建的 commit 短哈希写进 build_info.py，随 APK 一起打包。
+      # 这样 App 里能直接看到「装的是哪一版」，不用靠猜。
+      - name: Write build info
+        run: |
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          DATE=$(date -u '+%m-%d %H:%M')
+          printf "SHORT = '%s'\nDATE = '%s'\n" "$SHORT" "$DATE" > build_info.py
+          cat build_info.py
+
       - name: Build debug APK
         run: |
           set -o pipefail
