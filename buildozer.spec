@@ -84,7 +84,8 @@ p4a.branch = develop
 # 不需要任何存储权限：
 # 导入书籍走系统的 SAF 文件选择器（ACTION_OPEN_DOCUMENT），
 # 选中的文件会被复制进应用私有目录，因此不必申请 READ_EXTERNAL_STORAGE。
-android.permissions =
+# 但需要 INTERNET —— 微软 Edge 在线 TTS 是云端合成，必须联网。
+android.permissions = INTERNET
 
 # CI 上必须自动接受 SDK 许可协议
 android.accept_sdk_license = True

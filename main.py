@@ -47,7 +47,8 @@ from kivy.uix.slider import Slider
 from book_parser import BookParseError
 from book_parser import load_book as parse_book_file
 from config_manager import ConfigManager
-from tts_android import STATE_PAUSED, STATE_PLAYING, AndroidTTS
+from tts_android import STATE_PAUSED, STATE_PLAYING
+from tts_engine import ReaderTTS
 
 # ---- 调试：把关键触摸/滚动事件写进文件（Android 上 print 不一定进 logcat，
 #      文件最可靠；正式发布前去掉 diag() 调用即可）。
@@ -318,13 +319,14 @@ class AudioBookApp(App):
         self._config = ConfigManager(cfg_path)
         self.reader_font = float(self._config.get("font_size", 15))
 
-        self._engine = AndroidTTS(
+        self._engine = ReaderTTS(
             on_progress=self._on_progress,
             on_paragraph=self._on_paragraph,
             on_state=self._on_state,
             on_finished=self._on_finished,
             on_error=self._on_error,
             on_voices=self._on_voices,
+            user_data_dir=self.user_data_dir,
         )
         self._engine.start()
         self._engine.set_speed(float(self._config.get("speed", 1.0)))
@@ -1315,7 +1317,7 @@ class AudioBookApp(App):
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
 
         # ---- 音色 ----
-        box.add_widget(Label(text="音色（来自系统 TTS 引擎）", size_hint_y=None,
+        box.add_widget(Label(text="音色（系统引擎 + Edge 在线）", size_hint_y=None,
                              height=dp(24), font_size="13sp"))
         voice_labels = {v["label"]: v["name"] for v in getattr(self, "_voice_list", [])}
         current = str(self._config.get("voice_name", ""))
