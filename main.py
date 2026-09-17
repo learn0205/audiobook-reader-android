@@ -331,6 +331,9 @@ class AudioBookApp(App):
         self._tick_count = 0        # _tick 累计执行次数
         self._tick_mode = "未启动"   # Handler / Clock / 未启动
         self._wake_error = ""       # wakelock 申请失败原因
+        # ---- 前台服务（熄屏/后台朗读保活）----
+        self._fg_started = False
+        self._fg_error = ""
 
     # ============================================================
     #                        启动
@@ -1157,12 +1160,15 @@ class AudioBookApp(App):
         Clock.schedule_once(_apply, 0)
 
     def _on_state(self, state):
-        # 播放时持有 PARTIAL_WAKE_LOCK（熄屏后 CPU 不睡，朗读不断）；
-        # 非播放态释放，避免一直耗电。
+        # 播放时：持有 PARTIAL_WAKE_LOCK + 启动前台服务（熄屏/后台不冻结）；
+        # 非播放态释放 wakelock，彻底停止时再关掉前台服务（暂停时保留，续播更快）。
         if state == STATE_PLAYING:
             self._acquire_wake()
+            self._start_fg_service()
         else:
             self._release_wake()
+            if state == STATE_STOPPED:
+                self._stop_fg_service()
 
         def _apply(_dt):
             self.play_label = "‖ 暂停" if state == STATE_PLAYING else "▶ 播放"
@@ -1307,6 +1313,32 @@ class AudioBookApp(App):
             except Exception:
                 pass
             self._wake_lock = None
+
+    # ---- 前台服务：熄屏/切后台时让系统不冻结本 App ----
+    # p4a 的服务跑在独立进程，类名为「包名.ServicePlayback」
+    # （buildozer.spec: services = Playback:services/playback.py:...）
+    def _start_fg_service(self):
+        if not _JNIUS_OK or self._fg_started:
+            return
+        try:
+            mActivity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Svc = autoclass("org.audiobookreader.audiobookreader.ServicePlayback")
+            Svc.start(mActivity, "")
+            self._fg_started = True
+            self._fg_error = ""
+        except Exception as e:
+            self._fg_error = str(e)
+
+    def _stop_fg_service(self):
+        if not _JNIUS_OK or not self._fg_started:
+            return
+        try:
+            mActivity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Svc = autoclass("org.audiobookreader.audiobookreader.ServicePlayback")
+            Svc.stop(mActivity)
+        except Exception as e:
+            self._fg_error = str(e)
+        self._fg_started = False
 
     @staticmethod
     def _paint_bg(widget, color):
@@ -1518,13 +1550,16 @@ class AudioBookApp(App):
             "版本 %s\n"
             "推进 %s   tick=%d\n"
             "唤醒锁 %s%s\n"
+            "前台服务 %s%s\n"
             "引擎 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                "已持有" if self._wake_lock is not None else "未持有",
                ("  " + self._wake_error) if self._wake_error else "",
+               "已启动" if self._fg_started else "未启动",
+               ("  " + self._fg_error) if self._fg_error else "",
                _eng_state)
         )
-        _diag = Label(text=_diag_text, size_hint_y=None, height=dp(74),
+        _diag = Label(text=_diag_text, size_hint_y=None, height=dp(92),
                       font_size="11sp", color=C_DIM, halign="left", valign="top")
         _diag.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
         box.add_widget(_diag)

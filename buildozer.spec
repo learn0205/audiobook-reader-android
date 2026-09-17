@@ -89,7 +89,20 @@ p4a.branch = develop
 #   WAKE_LOCK —— 熄屏后保持 CPU 唤醒，朗读才不会被系统睡眠打断。
 #               ⚠️ 必须显式声明：少了它，wakelock 申请会**静默失败**，
 #               熄屏后 CPU 一睡，朗读立刻停（这正是「熄屏后只念一段」的元凶之一）。
-android.permissions = INTERNET, WAKE_LOCK
+#   以下三个是前台服务所需（Android 12+ 后台朗读必须靠前台服务）：
+#   FOREGROUND_SERVICE / FOREGROUND_SERVICE_MEDIA_PLAYBACK（Android 14+ 必需）
+#   POST_NOTIFICATIONS（Android 13+ 显示前台服务通知需要）
+android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS
+
+# ---------------------------------------------------------------------------
+#  前台服务：让系统在熄屏 / 切后台时不冻结本 App，保证朗读连续。
+#  Playback 是服务类名（Java 类为 <包名>.ServicePlayback），
+#  :foreground 声明为前台服务，:foregroundServiceType=mediaPlayback 是
+#  Android 14+ 使用 :foreground 的**强制要求**（本机是 Android 16）。
+#  ⚠️ p4a 的服务跑在独立进程（android:process=":Playback"），它不朗读，
+#     只负责「让 App 被系统视为有前台服务」+ 持有 wakelock。
+# ---------------------------------------------------------------------------
+services = Playback:services/playback.py:foreground:foregroundServiceType=mediaPlayback
 
 # CI 上必须自动接受 SDK 许可协议
 android.accept_sdk_license = True
