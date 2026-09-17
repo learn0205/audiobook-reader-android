@@ -302,7 +302,9 @@ class AudioBookApp(App):
 
         # 自动恢复上次的书；并轮询刷新进度
         Clock.schedule_once(self._restore_last_book, 0.6)
-        Clock.schedule_interval(self._tick, 0.4)
+        # 0.2 秒一次：_tick 里除了刷进度，还负责「朗读推进兜底」
+        # （轮询 isSpeaking，不依赖安卓的 onDone 回调）
+        Clock.schedule_interval(self._tick, 0.2)
         return root
 
     def _build_ui(self):
@@ -1013,15 +1015,19 @@ class AudioBookApp(App):
         self._config.set_position(self._book_key, para, char)
 
     def _tick(self, *_):
-        """定时任务（每 0.4 秒）：保存断点 + 刷新定时休眠倒计时。
+        """定时任务（每 0.2 秒）：推进兜底 + 保存断点 + 刷新休眠倒计时。
 
-        注意休眠用**时间戳**而不是"每 tick 减 1"——本函数每 0.4 秒就跑一次，
-        按 tick 计数会让倒计时快 2.5 倍（30 分钟变成 12 分钟就停）。
+        注意休眠用**时间戳**而不是"每 tick 减 1"——本函数每秒跑 5 次，
+        按 tick 计数会让倒计时快好几倍（30 分钟变成几分钟就停）。
         """
+        # ★ 朗读推进的兜底：不依赖安卓的 onDone 回调。
+        #   有设备上 onDone 根本不触发，只靠它就会「读完一句卡住不动」。
+        #   这里用 isSpeaking() 轮询，0.2 秒一次，最多多等 0.2 秒。
+        self._engine.poll_advance()
+
         if self._engine.get_state() == STATE_PLAYING:
             self._save_position()
-            # 用引擎的插值位置刷新进度条：否则它只在每读完一个朗读块时跳一格，
-            # 长句会明显一顿一顿。0.4 秒刷一次，看起来是连续推进的。
+            # 用引擎的插值位置刷新进度条：否则它只在每读完一句时跳一格
             _para, char_now, total_chars = self._engine.get_position()
             self._on_progress(char_now, total_chars)
         if self._sleep_until > 0:

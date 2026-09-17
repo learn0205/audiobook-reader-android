@@ -125,6 +125,11 @@ class AndroidTTS:
         self._sent_started = 0.0    # 当前句子开始发声的时刻
         self._error_count = 0       # 朗读失败次数（用于收敛错误提示）
 
+        # ---- 当前句的推进状态（onDone 回调与轮询兜底共用） ----
+        self._spoken_uid = None     # 正在等待读完的 utterance id
+        self._seen_speaking = False  # 是否已确认引擎真的开始发声
+        self._cur_chars = 0         # 当前句字数（用于校准语速）
+
         # ---- Java 对象 ----
         self._tts = None
         self._ready = False
@@ -374,7 +379,13 @@ class AndroidTTS:
             self.on_state(state)
 
     def _silence(self):
-        """立刻停掉当前朗读（并丢弃队列）。"""
+        """立刻停掉当前朗读（并丢弃队列）。
+
+        同时清空「正在等的句子」标记 —— 否则停止/暂停/跳转之后，
+        那个已作废的 utterance 还会被 onDone 或轮询误判成「读完了」。
+        """
+        self._spoken_uid = None
+        self._seen_speaking = False
         try:
             if self._tts is not None:
                 self._tts.stop()
@@ -382,7 +393,13 @@ class AndroidTTS:
             pass
 
     def _speak_current(self):
-        """朗读当前句子；读完由 onDone 回调推进到下一句。"""
+        """朗读当前句子。
+
+        推进方式有**两条路**，谁先到算谁：
+          ① onDone 回调（响应快，但不是所有机型/引擎都可靠）
+          ② poll_advance() 轮询 isSpeaking()（兜底，不依赖任何回调）
+        实测有设备上 onDone 根本不触发，只靠①就会「读完一句卡住不动」。
+        """
         if self._index >= len(self._sentences):
             self._finish()
             return
@@ -397,16 +414,53 @@ class AndroidTTS:
             self.on_paragraph(para_index)
             self.on_progress(self._char_pos, self._total_chars)
 
+        # 重置本句的推进状态
+        self._spoken_uid = None
+        self._seen_speaking = False
+        self._cur_chars = len(sentence)
+
         try:
             if self._tts is not None:
                 self._tts.setPitch(self._pitch_multiplier(para_index, self._index))
                 self._tts.setSpeechRate(self._speed)
                 # 记下时刻：万一引擎没回调 onStart，也能用这里兜底计时
                 self._sent_started = time.time()
-                self._speak_text(sentence, "s%d" % self._index)
+                uid = "s%d" % self._index
+                self._speak_text(sentence, uid)
+                self._spoken_uid = uid      # 只有真正调用成功才记上
         except Exception as err:
             self.on_error(f"朗读调用失败：{err}")
             self.stop()
+
+    def poll_advance(self):
+        """兜底推进：由主线程定时调用（不依赖任何 Java 回调）。
+
+        做法：确认引擎确实开始发声过（isSpeaking 为真），之后一旦发现它
+        停止发声，就认为本句读完，推进到下一句。
+        """
+        if self._state != STATE_PLAYING or self._tts is None:
+            return
+        if self._spoken_uid is None:        # 当前没有在等的句子
+            return
+        try:
+            speaking = bool(self._tts.isSpeaking())
+        except Exception:
+            return
+        if speaking:
+            self._seen_speaking = True      # 确认它真的开始说过
+            return
+        if not self._seen_speaking:
+            return                          # 还没开始发声，再等等，别抢跑
+        self._complete_current()
+
+    def _complete_current(self):
+        """当前句读完了：校准语速并推进（onDone 与轮询共用）。"""
+        if self._spoken_uid is None:
+            return
+        self._spoken_uid = None
+        self._seen_speaking = False
+        self._note_cps(self._cur_chars, time.time() - self._sent_started)
+        self._advance()
 
     def _speak_text(self, text, utterance_id):
         """调用 speak()。
@@ -468,17 +522,17 @@ class AndroidTTS:
         self._sent_started = time.time()
 
     def _on_utterance_done(self, utterance_id, generation):
-        """某句读完：先校准语速，再推进到下一句。
+        """某句读完（onDone 回调）。与轮询 poll_advance 互为备份。
 
-        generation 不符说明已被 stop/seek 作废，直接忽略。
+        用 utterance_id 判断是不是「当前正在等的这句」——
+        比 generation 可靠：generation 在回调里读的是**当前值**，
+        陈旧回调也会通过检查，可能重复推进。
         """
-        if generation != self._generation or self._state != STATE_PLAYING:
+        if self._state != STATE_PLAYING:
             return
-        # 用这一句的实际耗时校准语速（暂停/跳转后 generation 变了不会走到这）
-        if 0 <= self._index < len(self._sentences):
-            self._note_cps(len(self._sentences[self._index][1]),
-                           time.time() - self._sent_started)
-        self._advance()
+        if utterance_id != self._spoken_uid:
+            return                          # 不是当前这句（陈旧回调或已被轮询处理）
+        self._complete_current()
 
     def _on_utterance_error(self, utterance_id, error_code, generation):
         if generation != self._generation:
