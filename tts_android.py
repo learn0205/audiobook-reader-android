@@ -198,10 +198,24 @@ class AndroidTTS:
 
             self._init_listener = _InitListener(self)
             self._tts = TextToSpeech(activity, self._init_listener)
-            self._utter_listener = _UtteranceListener(self)
         except Exception as err:
             self._init_error = f"初始化安卓语音引擎失败：{err}"
             self.on_error(self._init_error)
+            return
+
+        # ⚠️ UtteranceProgressListener 是**抽象类、不是接口**，pyjnius 的
+        # __javainterfaces__ 实现不了它，构造时会抛
+        #   IllegalArgumentException: android.speech.tts.UtteranceProgressListener
+        #   is not an interface
+        # 之前这一句和引擎初始化写在同一个 try 里，于是「监听器装不上」直接导致
+        # **整个引擎初始化失败**（_ready 永远为 False、系统音色一个都枚举不到）。
+        # 监听器其实是**可选**的：朗读推进本来就靠 poll_advance() 轮询 isSpeaking()，
+        # 不依赖 onDone 回调。所以这里单独兜住，装不上也绝不能拖垮引擎。
+        try:
+            self._utter_listener = _UtteranceListener(self)
+        except Exception as err:
+            self._utter_listener = None
+            self.on_error("进度监听器不可用（不影响朗读）：%s" % err)
 
     def _on_init_done(self, status):
         """TextToSpeech 初始化回调（status=0 表示成功）。"""
@@ -209,8 +223,13 @@ class AndroidTTS:
             self._init_error = "系统语音引擎初始化失败，请到「设置 → 语言和输入 → 文字转语音」检查是否已安装语音数据。"
             self.on_error(self._init_error)
             return
+        # 监听器（可选）单独兜住：失败不影响「置就绪 + 枚举音色」
         try:
-            self._tts.setOnUtteranceProgressListener(self._utter_listener)
+            if self._utter_listener is not None:
+                self._tts.setOnUtteranceProgressListener(self._utter_listener)
+        except Exception as err:
+            self.on_error("进度监听器设置失败（不影响朗读）：%s" % err)
+        try:
             self._apply_language()
             self._ready = True
             self._collect_voices()
