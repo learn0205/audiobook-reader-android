@@ -31,12 +31,63 @@ from tts_android import (STATE_STOPPED, STATE_PLAYING, STATE_PAUSED,
                          split_sentences, AndroidTTS)
 
 try:
-    from jnius import autoclass, cast
+    from jnius import autoclass, cast, PythonJavaClass, java_method
     _JNIUS_OK = True
 except Exception:                      # 桌面环境
     autoclass = None
     cast = None
+    PythonJavaClass = object
+    java_method = None
     _JNIUS_OK = False
+
+
+if _JNIUS_OK:
+    class _MainRunnable(PythonJavaClass):
+        """把回调投递到安卓主线程执行（Runnable）。"""
+        __javainterfaces__ = ["java/lang/Runnable"]
+        __javacontext__ = "app"
+
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        @java_method("()V")
+        def run(self):
+            try:
+                self.fn()
+            except Exception:
+                pass
+else:
+    class _MainRunnable(object):
+        pass
+
+
+_MAIN_HANDLER = [None]
+
+
+def _post_to_main(fn):
+    """把 fn 投递到「安卓主线程」执行。
+
+    ⚠️ 关键：不能只用 Kivy 的 `Clock.schedule_once`——**熄屏后 Kivy 的逐帧时钟停摆**，
+    Clock 里的回调永远不会触发。Edge 后端「合成完 → 用 MediaPlayer 播放」这一步
+    原来走的是 Clock，于是熄屏后 Edge 音色会卡住不动。改用主线程 Handler，
+    熄屏也能照常播放（与主程序 _tick 的做法一致）。
+    """
+    if _JNIUS_OK:
+        try:
+            if _MAIN_HANDLER[0] is None:
+                _Handler = autoclass("android.os.Handler")
+                _Looper = autoclass("android.os.Looper")   # ⚠️ android.os 不是 java.util
+                _MAIN_HANDLER[0] = _Handler(_Looper.getMainLooper())
+            _MAIN_HANDLER[0].post(_MainRunnable(fn))
+            return
+        except Exception:
+            pass
+    try:
+        from kivy.clock import Clock
+        Clock.schedule_once(lambda _dt: fn(), 0)
+    except Exception:
+        fn()
 
 
 # ============================================================================
@@ -327,16 +378,14 @@ class EdgeTTS:
                     text, self._voice_name, path, rate=rate, pitch=pitch, volume=volume)
             if generation != self._generation:
                 return
-            # 回主线程播放
-            from kivy.clock import Clock
-            Clock.schedule_once(lambda dt: self._play_file(path, generation), 0)
+            # 回主线程播放（走 Handler，不用 Clock —— 熄屏后 Clock 不触发）
+            _post_to_main(lambda: self._play_file(path, generation))
         except Exception as e:
             if generation != self._generation:
                 return
             self._error_count += 1
             self.on_error("Edge 合成失败：%s" % e)
-            from kivy.clock import Clock
-            Clock.schedule_once(lambda dt: self._on_synth_error(generation), 0)
+            _post_to_main(lambda: self._on_synth_error(generation))
 
     def _on_synth_error(self, generation):
         if generation != self._generation:
