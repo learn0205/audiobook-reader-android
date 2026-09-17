@@ -1340,6 +1340,47 @@ class AudioBookApp(App):
             self._fg_error = str(e)
         self._fg_started = False
 
+    def _open_power_settings(self):
+        """打开系统「电池优化 / 后台管理」页，方便把本应用加入省电白名单。
+
+        为什么关键：安卓的「缓存应用冻结」按 **UID** 判定白名单
+        （`shouldNotFreeze = uidRec.isCurAllowListed()`）。加白名单后，
+        本应用的**所有进程**都不会被冻结——这是第三方应用能拿到的、
+        最可靠的「后台不被冻」手段（前台服务只能保住它自己那个进程）。
+        """
+        if not _JNIUS_OK:
+            self._toast("桌面环境无此设置")
+            return
+        try:
+            Intent = autoclass("android.content.Intent")
+            Settings = autoclass("android.provider.Settings")
+            Uri = autoclass("android.net.Uri")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            pkg = str(activity.getPackageName())
+            # ① 直达本应用的「电池优化」授权页（部分 ROM 需要权限，失败就往下退）
+            try:
+                it = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                it.setData(Uri.parse("package:" + pkg))
+                activity.startActivity(it)
+                self._toast("请在列表里把本应用设为「不优化 / 允许」")
+                return
+            except Exception:
+                pass
+            # ② 电池优化总列表
+            try:
+                activity.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                self._toast("请把本应用设为「不优化」")
+                return
+            except Exception:
+                pass
+            # ③ 兜底：本应用详情页
+            it = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            it.setData(Uri.parse("package:" + pkg))
+            activity.startActivity(it)
+            self._toast("请在「电池 / 耗电管理」里允许后台运行")
+        except Exception as e:
+            self._toast("无法打开系统设置：%s" % e)
+
     @staticmethod
     def _paint_bg(widget, color):
         """给控件加一层不透明底色（随控件位置/尺寸自适应）。
@@ -1542,7 +1583,10 @@ class AudioBookApp(App):
         from kivy.uix.spinner import Spinner
 
         popup = Popup(title="设置", size_hint=(0.92, 0.88))
-        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
+        # 内容较多（尤其小屏），放进 ScrollView，避免最下面的按钮被挤出弹窗
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12),
+                        size_hint_y=None)
+        box.bind(minimum_height=box.setter("height"))
 
         # 自检信息：无 adb 时让用户截图即可定位（装的是哪版 / 推进是否在跑 / 唤醒锁是否生效）
         _eng_state = self._engine.get_state() if self._engine is not None else "-"
@@ -1653,6 +1697,13 @@ class AudioBookApp(App):
         btn_help.bind(on_release=_show_help)
         box.add_widget(btn_help)
 
+        # 熄屏/后台朗读要靠系统「不冻结本应用」——一键跳到省电白名单设置页。
+        btn_power = Button(text="省电白名单（后台不被冻结）", size_hint_y=None,
+                           height=dp(44), background_normal="",
+                           background_color=C_PRIMARY, color=(1, 1, 1, 1))
+        btn_power.bind(on_release=lambda *_: self._open_power_settings())
+        box.add_widget(btn_power)
+
         # 主界面去掉了停止键（播放键改成暂停/继续切换），
         # 停止功能放这里，需要时还能用。
         btn_stop = Button(text="停止朗读", size_hint_y=None, height=dp(44),
@@ -1671,7 +1722,9 @@ class AudioBookApp(App):
                            color=(1, 1, 1, 1))
         btn_close.bind(on_release=lambda *_: popup.dismiss())
         box.add_widget(btn_close)
-        popup.content = box
+        _sv = ScrollView()
+        _sv.add_widget(box)
+        popup.content = _sv
         popup.open()
 
     def _slider_row(self, title, lo, hi, value, callback, fmt=None):
