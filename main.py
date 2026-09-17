@@ -159,6 +159,7 @@ class ParaView(Label):
         self.bg_color = [1.0, 0.90, 0.35, 1.0] if self.active else [0, 0, 0, 0]
 
     def on_touch_down(self, touch):
+        print(f"[DIAG] ParaView touch_down @ {touch.pos}, parent={type(self.parent).__name__}")
         # 关键：这里**不能** consume 触摸（不能 return True），
         # 否则 RecycleView 收不到手势，阅读区就滚不动了。
         # 只记下按下的位置，等 on_touch_up 时判断这是"点击"还是"滑动"。
@@ -170,6 +171,7 @@ class ParaView(Label):
         return super().on_touch_down(touch)
 
     def on_touch_move(self, touch):
+        print(f"[DIAG] ParaView touch_move @ {touch.pos}")
         # 手指一移动就说明用户在滚动，取消长按判定
         if getattr(self, "_pressed", False) and hasattr(self, "_press_pos"):
             dx = abs(touch.pos[0] - self._press_pos[0])
@@ -692,6 +694,7 @@ class AudioBookApp(App):
         这样拖正文和拖右侧滑块都能被识别——两者的共同结果都是 scroll_y
         发生了变化，比去拦截触摸事件可靠得多。
         """
+        print(f"[DIAG] scroll_y={self._scroll.scroll_y:.3f} programmatic={self._setting_scroll}")
         if self._setting_scroll:
             return
         self._last_user_scroll = time.time()
