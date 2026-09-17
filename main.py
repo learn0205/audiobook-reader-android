@@ -1468,7 +1468,12 @@ class AudioBookApp(App):
                 h = res.getDimensionPixelSize(rid)
                 density = res.getDisplayMetrics().density
                 if density:
-                    return int(round(h / density))
+                    nav = int(round(h / density))
+                    # 防御：万一 density 取错、换算异常，nav 会变得很大，
+                    # 控制条会被撑得极高、不透明底色盖住大片正文。
+                    # 只在合理区间（0~60dp）内采用，否则当作 0。
+                    if 0 < nav <= 60:
+                        return nav
         except Exception:
             pass
         return 0
