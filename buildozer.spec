@@ -29,7 +29,7 @@ source.include_exts = py,png,jpg,jpeg,kv,atlas,ttf,otf
 source.exclude_dirs = bin,.buildozer,__pycache__,.github
 source.exclude_patterns = *.pyc,*.pyo,*.spec
 
-version = 1.0
+version = 1.1
 
 # ---------------------------------------------------------------------------
 #  依赖：只要 kivy + pyjnius（调用安卓原生 TTS）+ android（Activity / 权限接口）
