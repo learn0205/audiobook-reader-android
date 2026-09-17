@@ -38,6 +38,9 @@ from kivy.uix.button import Button
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
+from kivy.uix.recycleboxlayout import RecycleBoxLayout
+from kivy.uix.recycleview import RecycleView
+from kivy.uix.recycleview.views import RecycleDataViewBehavior
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
 
@@ -91,6 +94,16 @@ KV = """
     # 滑块加大，手机上更好按
     cursor_size: dp(24), dp(24)
     cursor_image: ''
+
+<ChapterRow>:
+    # 章节目录里的一行（固定行高，配合 RecycleView 虚拟化）
+    halign: 'left'
+    valign: 'middle'
+    text_size: self.width - dp(20), None
+    padding_x: dp(10)
+    font_size: '13sp'
+    color: 0.90, 0.92, 0.95, 1
+    background_color: 0.18, 0.21, 0.26, 1
 
 <ParaView>:
     # 一段正文：点一下就从这段开始读；朗读中的那一段有底色。
@@ -187,6 +200,21 @@ class ParaView(Label):
         return super().on_touch_up(touch)
 
 
+class ChapterRow(RecycleDataViewBehavior, Button):
+    """章节目录里的一行。
+
+    固定行高 → 适合用 RecycleView：只创建可见的十几行。
+    之前一次性 new 出全部 1142 个按钮，手机上要卡 1~2 秒。
+    """
+
+    index = NumericProperty(0)      # 第几章
+
+    def on_release(self):
+        app = App.get_running_app()
+        if app is not None:
+            app.goto_chapter_index(self.index)
+
+
 class AudioBookApp(App):
     """主应用：书籍加载、播放调度、界面刷新。"""
 
@@ -215,6 +243,7 @@ class AudioBookApp(App):
         self._text_box = None       # 正文容器（只装当前章节）
         self._view_chapter = -1     # 当前渲染的是第几章（-1 = 未渲染）
         self._view_start = 0        # 当前渲染的首段在全书中的下标
+        self._chapter_popup = None  # 章节目录弹窗（点行后要关掉它）
         self._status_popup = None
         self._voice_list = []       # 系统音色列表（引擎初始化后填充）
         self._shown_errors = set()  # 已提示过的错误，避免连续失败时刷屏
@@ -1029,18 +1058,18 @@ class AudioBookApp(App):
             self._status_popup = None
 
     @staticmethod
-    def _make_scroll():
-        """构造一个「滚动条可以用手指拖」的 ScrollView。
+    @staticmethod
+    def _scroll_kwargs():
+        """滚动条设置 —— ScrollView 和 RecycleView 都用这套。
 
         Kivy 默认参数在手机上等于没法用：
           · scroll_type 默认 ['content'] —— 滚动条根本不是拖动目标
           · bar_width   默认只有 3px    —— 手指压根按不住
         合起来就是用户说的"右侧滚动条拖不动"。
-
         这里改成 bars+content 并加宽到 16dp（手指可点的尺寸），
         同时把颜色调亮一点，让用户知道这条能拖。
         """
-        return ScrollView(
+        return dict(
             scroll_type=["bars", "content"],
             bar_width=dp(16),
             bar_margin=0,
@@ -1049,35 +1078,58 @@ class AudioBookApp(App):
             bar_inactive_color=(0.35, 0.62, 1.0, 0.55),
         )
 
+    @classmethod
+    def _make_scroll(cls):
+        """构造一个「滚动条可以用手指拖」的 ScrollView。"""
+        return ScrollView(**cls._scroll_kwargs())
+
     def show_chapters(self):
-        """章节目录：点章节 → 跳转并开始朗读。"""
+        """章节目录：点章节 → 跳转并开始朗读。
+
+        用 RecycleView 只创建可见的十几行 —— 本书 1142 章，
+        一次性 new 出全部按钮在手机上要卡 1~2 秒。
+        固定行高正是 RecycleView 擅长的场景（正文那种高度不定的文本才不能用它）。
+        """
         if not self._chapters:
             self._toast("本书没有识别到章节")
             return
+        popup = Popup(title="目录（共 %d 章）" % len(self._chapters),
+                      size_hint=(0.92, 0.85))
+        rv = RecycleView(viewclass=ChapterRow, **self._scroll_kwargs())
+        # ⚠️ default_size 不能传 None（ReferenceListProperty 只收 list/tuple）
+        layout = RecycleBoxLayout(
+            orientation="vertical", spacing=dp(2),
+            default_size=(0, dp(46)),      # 固定行高
+            default_size_hint=(1, None),
+            size_hint_y=None,
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+        rv.add_widget(layout)
+        rv.data = [{"text": "%s    (第 %d 段)" % (t, s + 1), "index": i}
+                   for i, (t, s) in enumerate(self._chapters)]
+
         box = BoxLayout(orientation="vertical")
-        scroll = self._make_scroll()
-        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(2))
-        inner.bind(minimum_height=inner.setter("height"))
-        popup = Popup(title="目录", size_hint=(0.92, 0.85))
-        for title, start in self._chapters:
-            btn = Button(text="%s    (第 %d 段)" % (title, start + 1),
-                         size_hint_y=None, height=dp(44), halign="left",
-                         valign="middle", background_normal="",
-                         background_color=C_BTN, color=(1, 1, 1, 1),
-                         font_size="13sp")
-            btn.bind(size=lambda w, *_: setattr(w, "text_size", (w.width - dp(20), None)))
-            btn.bind(on_release=lambda _b, s=start: self._goto_chapter(popup, s))
-            inner.add_widget(btn)
-        scroll.add_widget(inner)
-        box.add_widget(scroll)
+        box.add_widget(rv)
         popup.content = box
+        self._chapter_popup = popup
         popup.open()
 
-    def _goto_chapter(self, popup, start):
-        popup.dismiss()
+    def goto_chapter_index(self, chapter_index):
+        """目录里点了第 chapter_index 章 → 跳过去并开始朗读。"""
+        if not self._chapters:
+            return
+        idx = max(0, min(int(chapter_index), len(self._chapters) - 1))
+        title, start = self._chapters[idx]
+        if self._chapter_popup is not None:
+            try:
+                self._chapter_popup.dismiss()
+            except Exception:
+                pass
+            self._chapter_popup = None
         self._engine.play(start)
         self._set_highlight(start)
-        self._toast("从「第 %d 段」开始朗读" % (start + 1))
+        self._save_position()
+        self._toast("从「%s」开始朗读" % title[:18])
 
     def show_settings(self):
         """设置面板：音色 / 音调 / 语速 / 语调起伏 / 字号 / 定时休眠。"""
