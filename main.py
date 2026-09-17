@@ -49,6 +49,19 @@ from book_parser import load_book as parse_book_file
 from config_manager import ConfigManager
 from tts_android import STATE_PAUSED, STATE_PLAYING, AndroidTTS
 
+# ---- 调试：把关键触摸/滚动事件写进文件（Android 上 print 不一定进 logcat，
+#      文件最可靠；正式发布前去掉 diag() 调用即可）。
+_DIAG = {"path": None}
+def diag(msg):
+    p = _DIAG["path"]
+    if not p:
+        return
+    try:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
 # ============================================================================
 #  中文字体注册 —— 不做这一步，界面上所有中文都是空白！
 #
@@ -159,7 +172,7 @@ class ParaView(Label):
         self.bg_color = [1.0, 0.90, 0.35, 1.0] if self.active else [0, 0, 0, 0]
 
     def on_touch_down(self, touch):
-        print(f"[DIAG] ParaView touch_down @ {touch.pos}, parent={type(self.parent).__name__}")
+        diag(f"[PV] down {touch.pos} collide={self.collide_point(*touch.pos)}")
         # 关键：这里**不能** consume 触摸（不能 return True），
         # 否则 RecycleView 收不到手势，阅读区就滚不动了。
         # 只记下按下的位置，等 on_touch_up 时判断这是"点击"还是"滑动"。
@@ -171,7 +184,7 @@ class ParaView(Label):
         return super().on_touch_down(touch)
 
     def on_touch_move(self, touch):
-        print(f"[DIAG] ParaView touch_move @ {touch.pos}")
+        diag(f"[PV] move {touch.pos}")
         # 手指一移动就说明用户在滚动，取消长按判定
         if getattr(self, "_pressed", False) and hasattr(self, "_press_pos"):
             dx = abs(touch.pos[0] - self._press_pos[0])
@@ -289,6 +302,14 @@ class AudioBookApp(App):
     def _build_real(self):
         Builder.load_string(KV)
 
+        # 调试：把关键事件写进文件，便于在真机上定位「为什么滑不动」
+        os.makedirs(self.user_data_dir, exist_ok=True)
+        _DIAG["path"] = os.path.join(self.user_data_dir, "diag.log")
+        try:
+            open(_DIAG["path"], "w", encoding="utf-8").close()
+        except Exception:
+            pass
+
         # 配置与语音引擎都放在应用私有目录（安卓上必然可写）
         cfg_path = os.path.join(self.user_data_dir, "config.json")
         self._config = ConfigManager(cfg_path)
@@ -362,6 +383,7 @@ class AudioBookApp(App):
         # 用普通控件即可，而且高度由 Kivy 自动算准
         # （RecycleView 对「高度不定的文本条目」反而算不准）。
         body = FloatLayout()
+        self._body = body          # 记住容器：_update_hint 要摘挂提示层
         self._scroll = self._make_scroll()
         self._text_box = BoxLayout(orientation="vertical", size_hint_y=None,
                                    spacing=dp(1), padding=[0, dp(6)])
@@ -369,6 +391,9 @@ class AudioBookApp(App):
         self._scroll.add_widget(self._text_box)
         body.add_widget(self._scroll)
         self._scroll.bind(scroll_y=self._on_scroll_y)
+        self._scroll.bind(
+            on_touch_down=lambda inst, t: diag(
+                f"[SV] down {t.pos} collide={self._scroll.collide_point(*t.pos)}"))
 
         self.lbl_hint = Label(
             text="尚未打开书籍\n\n"
@@ -660,14 +685,33 @@ class AudioBookApp(App):
             ))
         self._set_highlight(global_index)
         self._update_hint()
+        diag(f"[load] scroll_h={self._scroll.height} content_h="
+             f"{self._text_box.height} scrollable="
+             f"{self._text_box.height > self._scroll.height}")
 
     def _update_hint(self):
-        """没有书籍时显示操作说明；有书时收起，并禁止它拦截触摸。"""
-        if not hasattr(self, "lbl_hint"):
+        """没有书籍时显示操作说明；有书时**直接从控件树上摘掉**。
+
+        ⚠️ 关键：不能再只靠 opacity=0 + disabled。
+        提示层是加在滚动区**之后**的，FloatLayout 的触摸分发是「后添加的
+        先收到」，于是它排在正文前面。只把 opacity 设成 0 它依然留在控件树
+        里照样能拦截手势；disabled 在各 Kivy 版本下行为也不一致（有的版本
+        反而会吞掉 touch）。实测表现就是：点顶栏按钮有反应，但正文怎么滑
+        都不动。最保险的做法是直接 remove_widget —— 不在树里就不可能拦截。
+        """
+        if not hasattr(self, "lbl_hint") or not hasattr(self, "_body"):
             return
         empty = not self._paragraphs
-        self.lbl_hint.opacity = 1 if empty else 0
-        self.lbl_hint.disabled = not empty
+        if empty:
+            if self.lbl_hint.parent is None:
+                self._body.add_widget(self.lbl_hint)
+            self.lbl_hint.opacity = 1
+            self.lbl_hint.disabled = False
+        else:
+            if self.lbl_hint.parent is not None:
+                self.lbl_hint.parent.remove_widget(self.lbl_hint)
+            self.lbl_hint.opacity = 0
+            self.lbl_hint.disabled = True
 
     def _set_highlight(self, global_index):
         """把朗读中的那一段标黄。
@@ -694,7 +738,7 @@ class AudioBookApp(App):
         这样拖正文和拖右侧滑块都能被识别——两者的共同结果都是 scroll_y
         发生了变化，比去拦截触摸事件可靠得多。
         """
-        print(f"[DIAG] scroll_y={self._scroll.scroll_y:.3f} programmatic={self._setting_scroll}")
+        diag(f"[scroll_y] {self._scroll.scroll_y:.3f} programmatic={self._setting_scroll}")
         if self._setting_scroll:
             return
         self._last_user_scroll = time.time()
@@ -1135,6 +1179,12 @@ class AudioBookApp(App):
             bar_pos_y="right",
             bar_color=(0.35, 0.62, 1.0, 0.95),
             bar_inactive_color=(0.35, 0.62, 1.0, 0.55),
+            # 正文只纵向滚，不让横向手势来抢
+            do_scroll_x=False,
+            do_scroll_y=True,
+            # 默认 20 太迟钝：手指要滑出挺长一段距离才开始滚，
+            # 在手机上容易让人以为"滑不动"
+            scroll_distance=dp(8),
         )
 
     @classmethod
