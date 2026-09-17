@@ -1381,6 +1381,53 @@ class AudioBookApp(App):
         except Exception as e:
             self._toast("无法打开系统设置：%s" % e)
 
+    # 各 ROM 的「自启动管理」是隐藏页面，没有公开 Action，只能按包名/类名逐个试。
+    # 本机是 vivo（OriginOS），vivo 的几个入口排在最前。
+    _AUTOSTART_ENTRIES = [
+        ("com.vivo.permissionmanager",
+         "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"),
+        ("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"),
+        ("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"),
+        ("com.vivo.abe", "com.vivo.abe.ui.appdefaults.WhiteListActivity"),
+        ("com.coloros.safecenter",
+         "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+        ("com.miui.securitycenter",
+         "com.miui.permcenter.autostart.AutoStartManagementActivity"),
+        ("com.huawei.systemmanager",
+         "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+    ]
+
+    def _open_autostart_settings(self):
+        """打开「自启动 / 后台运行」管理页（隐藏入口逐个尝试，全失败退到应用详情页）。"""
+        if not _JNIUS_OK:
+            self._toast("桌面环境无此设置")
+            return
+        try:
+            Intent = autoclass("android.content.Intent")
+            ComponentName = autoclass("android.content.ComponentName")
+            Settings = autoclass("android.provider.Settings")
+            Uri = autoclass("android.net.Uri")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            pkg = str(activity.getPackageName())
+
+            for comp_pkg, comp_cls in self._AUTOSTART_ENTRIES:
+                try:
+                    it = Intent()
+                    it.setComponent(ComponentName(comp_pkg, comp_cls))
+                    activity.startActivity(it)
+                    self._toast("请在列表里允许本应用「自启动 / 后台运行」")
+                    return
+                except Exception:
+                    continue
+
+            # 兜底：应用详情页（从这里一般能找到电池 / 权限 / 自启动入口）
+            it = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            it.setData(Uri.parse("package:" + pkg))
+            activity.startActivity(it)
+            self._toast("请在「电池 / 权限」里允许后台运行；或到设置顶部搜索“自启动”")
+        except Exception as e:
+            self._toast("无法打开系统设置：%s" % e)
+
     @staticmethod
     def _paint_bg(widget, color):
         """给控件加一层不透明底色（随控件位置/尺寸自适应）。
@@ -1703,6 +1750,13 @@ class AudioBookApp(App):
                            background_color=C_PRIMARY, color=(1, 1, 1, 1))
         btn_power.bind(on_release=lambda *_: self._open_power_settings())
         box.add_widget(btn_power)
+
+        # 自启动 / 后台运行权限（各 ROM 是隐藏页，这里按包名逐个试跳转）
+        btn_auto = Button(text="自启动 / 后台权限", size_hint_y=None, height=dp(44),
+                          background_normal="", background_color=C_BTN,
+                          color=C_TEXT)
+        btn_auto.bind(on_release=lambda *_: self._open_autostart_settings())
+        box.add_widget(btn_auto)
 
         # 主界面去掉了停止键（播放键改成暂停/继续切换），
         # 停止功能放这里，需要时还能用。
