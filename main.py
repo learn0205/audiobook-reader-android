@@ -313,11 +313,10 @@ class AudioBookApp(App):
         top = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(5),
                         padding=[dp(6), dp(4)])
 
-        def _top_btn(text, color=(.18, .44, .93, 1), width=52):
-            btn = Button(text=text, size_hint_x=None, width=dp(width),
-                         background_normal="", background_color=color,
-                         color=(1, 1, 1, 1), font_size="12sp")
-            return btn
+        def _top_btn(text, color=C_BTN, width=46):
+            return Button(text=text, size_hint_x=None, width=dp(width),
+                          background_color=color, color=C_TEXT,
+                          font_size="12sp")
 
         btn_toc = _top_btn("目录")
         btn_toc.bind(on_release=lambda *_: self.show_chapters())
@@ -326,10 +325,9 @@ class AudioBookApp(App):
         self.bind(book_title=lambda _i, v: setattr(self.lbl_title, "text", v))
         btn_bm = _top_btn("书签")
         btn_bm.bind(on_release=lambda *_: self.show_bookmarks())
-        btn_open = _top_btn("打开", color=(.30, .34, .40, 1))
+        btn_open = _top_btn("打开")
         btn_open.bind(on_release=lambda *_: self.pick_file())
-        btn_set = _top_btn("设置")
-        btn_set.bind(on_release=lambda *_: self.show_settings())
+        btn_set = _top_btn("设置", color=C_PRIMARY)
 
         top.add_widget(btn_toc)
         top.add_widget(self.lbl_title)
@@ -1273,22 +1271,30 @@ class AudioBookApp(App):
         self._config.set("speed", speed)
 
     def _on_font(self, value):
-        """字号滑块：只记录，等停手后再重建正文（防抖）。
+        """调整正文字号。
 
-        字号一变，每段高度都要重算，比较重；拖动过程中每动一下就重建会卡。
-        所以 0.35 秒内的连续变化只重建一次。
+        直接改每个段落控件的 reader_font_size 即可 —— KV 里
+        `font_size: str(int(root.reader_font_size)) + 'sp'` 是绑定关系，
+        改了属性 Kivy 会自动重算文字纹理和段落高度。
+
+        **不要**用「整章重建 + 防抖」：重建一次要 0.48 秒，
+        拖动过程中完全没有反馈，松手后才变，用起来跟坏了一样。
         """
-        self.reader_font = float(value)
+        size = float(value)
+        self.reader_font = size
         self._config.set("font_size", int(value))
-        if self._font_event is not None:
-            self._font_event.cancel()
-        self._font_event = Clock.schedule_once(self._apply_font_refresh, 0.35)
+        if self._text_box is None:
+            return
+        for widget in self._text_box.children:
+            widget.reader_font_size = size
+        # 字号变了每段高度都变，重算一下滚动位置，别让当前段跑出视野
+        self._scroll_to_local(self.highlight_index - self._view_start)
 
     def _apply_font_refresh(self, *_):
+        """兼容保留：若外部仍调用，按当前字号重建一次。"""
         self._font_event = None
         if not self._paragraphs:
             return
-        # 字号变了、每段高度都变，直接整章重建（单章只有一百多段，很快）
         self._view_chapter = -1
         self._refresh_view()
 
