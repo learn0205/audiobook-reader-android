@@ -1098,7 +1098,7 @@ class AudioBookApp(App):
             return
         popup = Popup(title="目录（共 %d 章）" % len(self._chapters),
                       size_hint=(0.92, 0.85))
-        rv = RecycleView(viewclass=ChapterRow, **self._scroll_kwargs())
+        rv = RecycleView(**self._scroll_kwargs())
         # ⚠️ default_size 不能传 None（ReferenceListProperty 只收 list/tuple）
         layout = RecycleBoxLayout(
             orientation="vertical", spacing=dp(2),
@@ -1108,6 +1108,14 @@ class AudioBookApp(App):
         )
         layout.bind(minimum_height=layout.setter("height"))
         rv.add_widget(layout)
+        # ★ viewclass 必须在 add_widget(layout) **之后**设！
+        #   RecycleView.viewclass 是 AliasProperty，setter 里是
+        #       a = self.layout_manager
+        #       if a is not None: a.viewclass = value
+        #   layout_manager 由第一个子控件决定；先设 viewclass 的话
+        #   layout_manager 还是 None，值被静默丢弃 → viewclass 变 None
+        #   → 一行都渲染不出来（这就是「内容不显示」的真凶）。
+        rv.viewclass = "ChapterRow"
         rv.data = [{"text": "%s    (第 %d 段)" % (t, s + 1), "index": i}
                    for i, (t, s) in enumerate(self._chapters)]
 
