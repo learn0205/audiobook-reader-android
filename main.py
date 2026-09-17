@@ -331,6 +331,7 @@ class AudioBookApp(App):
         self._tick_count = 0        # _tick 累计执行次数
         self._tick_mode = "未启动"   # Handler / Clock / 未启动
         self._wake_error = ""       # wakelock 申请失败原因
+        self._last_error = ""       # 最近一次错误（显示在自检信息里，便于截图定位）
         # ---- 前台服务（熄屏/后台朗读保活）----
         self._fg_started = False
         self._fg_error = ""
@@ -1183,6 +1184,9 @@ class AudioBookApp(App):
     def _on_error(self, message):
         """错误提示：同样的信息只弹一次，避免连续失败时刷屏。"""
         key = str(message)
+        # 记下「最近一次错误」，显示在设置面板的自检信息里——
+        # toast 只弹 2 秒、用户来不及截图，自检信息是持久可见的诊断入口。
+        self._last_error = key
         if key in self._shown_errors:
             return
         # 上限保护：跑一整本书可能积累很多不同错误，别让集合无限长大
@@ -1646,13 +1650,15 @@ class AudioBookApp(App):
             "推进 %s   tick=%d\n"
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
-            "引擎 %s"
+            "引擎 %s\n"
+            "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                "已持有" if self._wake_lock is not None else "未持有",
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",
                ("  " + self._fg_error) if self._fg_error else "",
-               _eng_state)
+               _eng_state,
+               (str(self._last_error)[:120] or "无"))
         )
         _diag = Label(text=_diag_text, size_hint_y=None, height=dp(92),
                       font_size="11sp", color=C_DIM, halign="left", valign="top")

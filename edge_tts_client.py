@@ -369,17 +369,23 @@ def synthesize(text, voice, rate="+0%", pitch="+0Hz", volume="+0%",
     config, ssml = _build_messages(voice, safe_text, rate, pitch, volume)
 
     last_err = None
+    stage = "init"
     for attempt in range(retries + 1):
         try:
+            stage = "ssl"                  # 出错时能看出卡在哪一步（自检面板会显示）
             ctx = _make_ssl_context()      # 安卓上必须显式带上 CA（见 _make_ssl_context）
+            stage = "connect"
             sock = socket.create_connection((_WS_HOST, _WS_PORT), timeout=timeout)
+            stage = "tls"
             ssock = ctx.wrap_socket(sock, server_hostname=_WS_HOST)
             try:
+                stage = "handshake"
                 use_deflate = _ws_handshake(ssock, str(uuid.uuid4()))
                 # 仅当服务端确实协商了 permessage-deflate 才启用压缩 / 解压。
                 # 否则明文收发——之前“连接被提前关闭”的根因正是：服务端未协商
                 # deflate，客户端却压缩了出站帧（带 RSV1 位），服务端视为协议违规直接断开。
                 comp = zlib.compressobj(wbits=-zlib.MAX_WBITS) if use_deflate else None
+                stage = "send"
                 _send_frame(ssock, config, opcode=1, comp=comp)
                 _send_frame(ssock, ssml, opcode=1, comp=comp)
                 # 解压器整条连接共用（context takeover）。未协商时为 None。
@@ -391,6 +397,7 @@ def synthesize(text, voice, rate="+0%", pitch="+0Hz", volume="+0%",
                 # "Path:audio...\\r\\n\\r\\n" 头，否则会把头字节混进 mp3 导致文件损坏。
                 msg_op = None
                 msg_buf = bytearray()
+                stage = "recv"
                 while not turn_ended:
                     fin, opcode, payload = _read_frame(ssock, decomp)
                     if opcode == 8:               # close
@@ -449,7 +456,9 @@ def synthesize(text, voice, rate="+0%", pitch="+0Hz", volume="+0%",
                 except Exception:
                     pass
         except Exception as e:
-            last_err = e
+            # 带上失败的阶段名（ssl/connect/tls/handshake/send/recv），
+            # 出错信息会显示在 App 的设置→自检信息里，便于一眼定位
+            last_err = "[%s] %r" % (stage, e)
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Edge TTS 合成失败（已重试 {retries} 次）: {last_err}")
 
