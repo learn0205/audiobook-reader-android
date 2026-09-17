@@ -334,6 +334,7 @@ class AudioBookApp(App):
         btn_open = _top_btn("打开")
         btn_open.bind(on_release=lambda *_: self.pick_file())
         btn_set = _top_btn("设置", color=C_PRIMARY)
+        btn_set.bind(on_release=lambda *_: self.show_settings())
 
         top.add_widget(btn_toc)
         top.add_widget(self.lbl_title)
