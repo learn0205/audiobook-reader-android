@@ -325,6 +325,7 @@ class AudioBookApp(App, WakelockFgMixin):
         self._wake_error = ""       # wakelock 申请失败原因
         self._last_error = ""       # 最近一次错误（显示在自检信息里，便于截图定位）
         self._last_persist = 0.0    # 断点上次落盘的时刻（限流用，避免每 0.2s 写盘）
+        self._layout_fixes = 0      # 布局保镖纠正错位的次数（自检 fix= 字段）
         # ---- 前台服务（熄屏/后台朗读保活）----
         self._fg_started = False
         self._fg_error = ""
@@ -407,6 +408,38 @@ class AudioBookApp(App, WakelockFgMixin):
         self._setup_tick_loop()
         self._start_tick_loop()
         return root
+
+    def _enforce_layout(self, *_dt):
+        """布局保镖：每帧把 4 个区块钉在正确位置，错位就当场纠正并计数。
+
+        设备上出现过诡异状态：两种完全不同的布局方案（手动绝对定位 /
+        标准 BoxLayout）都把 body 尺寸算对、y 却停在 0——自检数据为
+        bTop==body 高度、gap==底部两行总高，表现为顶部约 1/4 黑区 +
+        正文穿透进度条/按钮行；桌面（同为 Kivy 2.3.1）无法复现。
+        与其继续猜设备上是谁在布局后改位置，不如直接以 root 尺寸为准
+        每帧强制钉死；自检 fix= 字段非 0 即说明设备上确有东西在改布局。
+        """
+        try:
+            root = self._body.parent
+            W, H = root.width, root.height
+            top_h = self._top_w.height
+            prog_h = self._prog_box.height
+            ctrl_h = self._ctrl.height
+            body_h = max(0, H - top_h - prog_h - ctrl_h)
+            want = (
+                (self._top_w, 0, H - top_h, W, top_h),
+                (self._body, 0, prog_h + ctrl_h, W, body_h),
+                (self._prog_box, 0, ctrl_h, W, prog_h),
+                (self._ctrl, 0, 0, W, ctrl_h),
+            )
+            for w, x, y, ww, hh in want:
+                if (abs(w.x - x) > 1 or abs(w.y - y) > 1
+                        or abs(w.width - ww) > 1 or abs(w.height - hh) > 1):
+                    w.pos = (x, y)
+                    w.size = (ww, hh)
+                    self._layout_fixes += 1
+        except Exception:
+            pass
 
     def _build_ui(self):
         """用 Python 拼布局（比 KV 更容易精确控制移动端尺寸）。"""
@@ -589,6 +622,10 @@ class AudioBookApp(App, WakelockFgMixin):
         ctrl.add_widget(self.btn_set)
         self._ctrl = ctrl
         root.add_widget(ctrl)
+        # 布局保镖（见 _enforce_layout）：每帧核对、错位即纠，设备上若仍有
+        # 东西在布局后复位 body.y，画面也会被立刻拉回正确位置，且自检 fix=
+        # 计数会如实记录 —— 下次再有诡异布局，看这个数字就知道保镖在工作。
+        Clock.schedule_interval(self._enforce_layout, 0)
         return root
 
     # ============================================================
@@ -1565,20 +1602,28 @@ class AudioBookApp(App, WakelockFgMixin):
                 _wh = int(_W.height)
                 # 正文区、顶栏底部在 window 中的实际像素 y
                 _b_top_y = int(self._body.to_window(0, self._body.height)[1])
+                _b_y = int(self._body.to_window(0, 0)[1])
                 _root = self._body.parent
+                # root 子控件顺序（类型首字母，后添加的在前）：
+                # 正确应为 "BBFB" —— F(loatLayout)=正文区，排在两个 B 之间
+                _kids = "".join(type(c).__name__[0] for c in _root.children)
                 _top_w = max(_root.children, key=lambda c: c.to_window(0, c.height)[1])
                 _t_bot_y = int(_top_w.to_window(0, 0)[1])
                 _root_h = int(_root.height)
                 _root_y = int(_root.to_window(0, _root.height)[1])
             except Exception:
                 _wh = _b_top_y = _t_bot_y = _root_h = _root_y = -1
+                _b_y = -1
+                _kids = "?"
             _gap_px = -1 if _b_top_y < 0 or _t_bot_y < 0 else (_b_top_y - _t_bot_y)
             _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d body=%.0f winH=%d "
-                       "rootH=%d rootY=%d tBot=%d bTop=%d gap2=%d") % (
+                       "rootH=%d rootY=%d tBot=%d bTop=%d gap2=%d "
+                       "bY=%d fix=%d kids=%s") % (
                 self._scroll.height, self._text_box.height,
                 self._scroll.scroll_y, _gty,
                 getattr(self._body, "height", -1), _wh, _root_h, _root_y,
-                _t_bot_y, _b_top_y, _gap_px)
+                _t_bot_y, _b_top_y, _gap_px,
+                _b_y, self._layout_fixes, _kids)
         except Exception:
             _layout = "-"
         # 上次打开的书 + 已存断点（验证「记忆功能」是否生效）
