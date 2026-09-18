@@ -107,6 +107,59 @@ def diag(msg):
     except Exception:
         pass
 
+
+# ============================================================================
+#  崩溃留痕 —— 闪退时把 traceback 存下来，并显示在「设置 → 自检信息」里
+#
+#  安卓上用户拿不到 logcat；而且 **Kivy 的 ExceptionManager 会把事件回调里
+#  抛出的异常吞掉**（只打日志），所以「暂停闪退」这类问题在 App 里完全看不到。
+#  这里接住三类异常：主线程未捕获、子线程未捕获、Kivy 事件回调里的。
+# ============================================================================
+_CRASH = {"text": ""}
+
+
+def _record_crash(text):
+    _CRASH["text"] = (text or "").strip()[-700:]
+    p = _DIAG.get("path")
+    if p:
+        try:
+            with open(p + ".crash", "a", encoding="utf-8") as f:
+                f.write((text or "") + "\n" + "-" * 60 + "\n")
+        except Exception:
+            pass
+
+
+def _install_crash_handlers():
+    def _hook(exc_type, exc, tb):
+        try:
+            _record_crash("".join(traceback.format_exception(exc_type, exc, tb)))
+        except Exception:
+            pass
+        try:
+            sys.__excepthook__(exc_type, exc, tb)
+        except Exception:
+            pass
+
+    sys.excepthook = _hook
+    try:
+        threading.excepthook = lambda a: _hook(a.exc_type, a.exc_value,
+                                               a.exc_traceback)
+    except Exception:
+        pass
+    # Kivy 会吞掉事件回调（按钮 on_release 等）里的异常 —— 挂 handler 留痕
+    try:
+        from kivy.base import ExceptionHandler, ExceptionManager
+
+        class _CrashHandler(ExceptionHandler):
+            def handle_exception(self, inst):
+                _record_crash(traceback.format_exc())
+                return ExceptionManager.RAISE
+
+        ExceptionManager.add_handler(_CrashHandler())
+    except Exception:
+        pass
+
+
 # ============================================================================
 #  中文字体注册 —— 不做这一步，界面上所有中文都是空白！
 #
@@ -375,6 +428,8 @@ class AudioBookApp(App):
             open(_DIAG["path"], "w", encoding="utf-8").close()
         except Exception:
             pass
+        # 接住异常并留痕（闪退排查用）
+        _install_crash_handlers()
 
         # 配置与语音引擎都放在应用私有目录（安卓上必然可写）
         cfg_path = os.path.join(self.user_data_dir, "config.json")
@@ -1072,16 +1127,22 @@ class AudioBookApp(App):
         if not self._paragraphs:
             self._toast("请先打开一本书")
             return
-        state = self._engine.get_state()
-        if state == STATE_PLAYING:
-            self._engine.pause()
-        elif state == STATE_PAUSED:
-            self._follow = True       # 继续播放 → 恢复「高亮跟随」
-            self._engine.resume()
-        else:
-            self._follow = True
-            para, _, _ = self._engine.get_position()
-            self._engine.play(para)
+        try:
+            state = self._engine.get_state()
+            if state == STATE_PLAYING:
+                self._engine.pause()
+            elif state == STATE_PAUSED:
+                self._follow = True       # 继续播放 → 恢复「高亮跟随」
+                self._engine.resume()
+            else:
+                self._follow = True
+                para, _, _ = self._engine.get_position()
+                self._engine.play(para)
+        except Exception:
+            # Kivy 会吞掉按钮回调里的异常 —— 这里显式留痕，便于定位「暂停闪退」
+            tb = traceback.format_exc()
+            _record_crash(tb)
+            self._on_error("播放/暂停出错：%s" % tb.strip().splitlines()[-1])
 
     def jump_paragraph(self, delta):
         if not self._paragraphs:
@@ -1747,6 +1808,13 @@ class AudioBookApp(App):
             _pos_s = ("第%d段" % _pos[0]) if _pos else "无"
         except Exception:
             _book, _pos_s = "-", "-"
+        # 崩溃留痕：只显示 traceback 的最后一行（异常信息本身）
+        try:
+            _crash_last = ""
+            if _CRASH.get("text"):
+                _crash_last = _CRASH["text"].strip().splitlines()[-1][:170]
+        except Exception:
+            _crash_last = ""
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
@@ -1755,6 +1823,7 @@ class AudioBookApp(App):
             "引擎 %s\n"
             "正文 %s\n"
             "记忆 书=%s  断点=%s\n"
+            "崩溃 %s\n"
             "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                "已持有" if self._wake_lock is not None else "未持有",
@@ -1763,6 +1832,7 @@ class AudioBookApp(App):
                ("  " + self._fg_error) if self._fg_error else "",
                _eng_state, _layout,
                _book, _pos_s,
+               (_crash_last or "无"),
                (str(self._last_error)[:120] or "无"))
         )
         _diag = Label(text=_diag_text, size_hint_y=None, height=dp(92),
