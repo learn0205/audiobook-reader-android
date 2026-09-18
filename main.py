@@ -409,21 +409,23 @@ class AudioBookApp(App, WakelockFgMixin):
         return root
 
     def _reflow(self, *_):
-        # device 上 Kivy BoxLayout vertical 排列方向反了，改用绝对定位手动排 4 个子
+        # device 上 Kivy BoxLayout vertical 排列方向反了，改用绝对定位手动排 4 个子。
+        # ⚠️ body 高度只能从 parent 高度和上下两行算出来，绝不能引用 body 自己的
+        #    height —— 以前 `_y -= self._body.height` 让 _body_h 依赖旧值，而改
+        #    body.size 又触发 size 绑定再次调用 _reflow，高度在负值/全屏间交替，
+        #    无限递归直到栈溢出（启动第一帧就卡死/段错误）。
         try:
             _W = self._body.parent.width
             _H = self._body.parent.height
-            _y = _H
-            _y -= self._top_w.height
-            self._top_w.pos = (0, _y); self._top_w.size = (_W, self._top_w.height)
-            _y -= self._body.height
-            _body_h = _y - self._prog_box.height - self._ctrl.height
-            self._body.pos = (0, _y); self._body.size = (_W, _body_h)
-            self._body.height = _body_h  # 显式 height（防 Kivy 在 do_layout 时按 parent 覆盖）
-            _y -= self._prog_box.height
-            self._prog_box.pos = (0, _y); self._prog_box.size = (_W, self._prog_box.height)
-            _y -= self._ctrl.height
-            self._ctrl.pos = (0, _y); self._ctrl.size = (_W, self._ctrl.height)
+            _top_h = self._top_w.height
+            _prog_h = self._prog_box.height
+            _ctrl_h = self._ctrl.height
+            _body_h = max(0, _H - _top_h - _prog_h - _ctrl_h)
+            self._top_w.pos = (0, _H - _top_h); self._top_w.size = (_W, _top_h)
+            # 正文区严格夹在顶栏之下、进度条+控制条之上
+            self._body.pos = (0, _prog_h + _ctrl_h); self._body.size = (_W, _body_h)
+            self._prog_box.pos = (0, _ctrl_h); self._prog_box.size = (_W, _prog_h)
+            self._ctrl.pos = (0, 0); self._ctrl.size = (_W, _ctrl_h)
         except Exception:
             pass
 
@@ -475,7 +477,7 @@ class AudioBookApp(App, WakelockFgMixin):
         # 番茄小说也是按章加载的。单章中位 130 段、最多 400 段，
         # 用普通控件即可，而且高度由 Kivy 自动算准
         # （RecycleView 对「高度不定的文本条目」反而算不准）。
-        body = FloatLayout(size_hint_y=1)
+        body = FloatLayout(size_hint_y=None)  # 高度由 _reflow 精确算出（见下）
         # 双重保险：body 自己画上 C_BG。即便 Window.clearcolor 没生效或被覆盖，
         # 正文区里的空白也显示为深灰（页面背景），不会再露 Window 默认纯黑。
         from kivy.graphics import Color, Rectangle
@@ -486,13 +488,6 @@ class AudioBookApp(App, WakelockFgMixin):
                   size=lambda w, v: setattr(rect, "size", v))
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
         self._top_w = top
-        # ★ 强制：body 紧接顶栏下方（防 root 没填满 window、或 BoxLayout 把 body
-        # 推到了异常位置 —— 上一次诊断显示正文区离顶栏 660px 才出现"黑空区"）
-        try:
-            _top = max(body.parent.children, key=lambda c: c.y)
-            body.y = _top.height
-        except Exception:
-            pass
         self._scroll = self._make_scroll()
         # 顶部留白 = 两倍 15 号字（2 × sp(15) = sp(30)）：
         # 强制正文内容从「界面顶端往下 30 字号」处开始展示，其余布局随之对齐。
@@ -610,11 +605,14 @@ class AudioBookApp(App, WakelockFgMixin):
         root.add_widget(ctrl)
         # ★ device 上 Kivy BoxLayout vertical 排列方向反了（children[0] 排最顶部），
         # body 没紧接 top、整段 660px 黑空区。改用绝对定位手动排 4 个子。
+        # ★ device 上 Kivy BoxLayout vertical 排列方向反了（children[0] 排最顶部），
+        # body 没紧接 top。改用绝对定位 _reflow 手动排 4 个子：
+        # 顶栏在最上 → 正文紧贴顶栏下沿 → 进度条 → 控制条（含系统导航栏高度）。
+        # body 的 size_hint_y=None，FloatLayout 的 do_layout 不会动它的位置/尺寸，
+        # 所以只需在 root 尺寸变化时重排一次，无需再靠 body.size 绑定自我纠正
+        # （那个绑定 + 依赖 body.height 的算法曾造成无限递归 → 启动卡死）。
         self._body.parent.bind(size=self._reflow, pos=self._reflow)
         Clock.schedule_once(self._reflow, 0)
-        # 额外保险：body 自己 size 变化时也强制 _reflow（Kivy do_layout 会把 body.size
-        # 改回 parent.size = 800，必须每次纠正）
-        self._body.bind(size=lambda w, v: self._reflow())
         return root
 
     # ============================================================
