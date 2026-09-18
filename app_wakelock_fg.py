@@ -9,11 +9,29 @@ import sys  # noqa: F401  保留以备后续需要；当前未直接使用
 import threading  # noqa: F401  同上
 
 try:
-    from jnius import autoclass
+    from jnius import autoclass, PythonJavaClass, java_method
     _JNIUS_OK = True
 except Exception:
     autoclass = None
     _JNIUS_OK = False
+
+
+if _JNIUS_OK:
+    class _MediaActionListener(PythonJavaClass):
+        """实现 MediaActionListener 接口：通知栏/耳机按键动作 → Python。"""
+        __javainterfaces__ = ["org/audiobookreader/android/MediaActionListener"]
+        __javacontext__ = "app"
+
+        def __init__(self, owner):
+            super().__init__()
+            self.owner = owner
+
+        @java_method("(Ljava/lang/String;)V")
+        def onAction(self, action):
+            self.owner._on_media_action(action)
+else:
+    class _MediaActionListener:     # pragma: no cover
+        pass
 
 
 class WakelockFgMixin:
@@ -156,6 +174,59 @@ class WakelockFgMixin:
             self._toast("请在「电池 / 权限」里允许后台运行；或到设置顶部搜索“自启动”")
         except Exception as e:
             self._toast("无法打开系统设置：%s" % e)
+
+    # ==================== 通知栏媒体控制 / MediaSession ====================
+    def _media_setup(self):
+        """创建 MediaSession + 通知栏控制（Java 桥未编译/失败时静默降级）。"""
+        if not _JNIUS_OK or getattr(self, "_media_ok", False):
+            return
+        try:
+            MediaControls = autoclass("org.audiobookreader.android.MediaControls")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            self._media_cb = _MediaActionListener(self)
+            MediaControls.setup(PythonActivity.mActivity, self._media_cb)
+            self._media_ok = True
+            self._media_error = ""
+        except Exception as e:
+            self._media_ok = False
+            self._media_error = str(e)[:60]
+
+    def _media_update(self, playing):
+        """刷新通知（播放/暂停态 + 当前章节标题）。"""
+        if not getattr(self, "_media_ok", False) or not _JNIUS_OK:
+            return
+        try:
+            MediaControls = autoclass("org.audiobookreader.android.MediaControls")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            MediaControls.update(PythonActivity.mActivity, bool(playing),
+                                 str(getattr(self, "book_title", "")))
+        except Exception:
+            pass
+
+    def _media_teardown(self):
+        """彻底停止朗读时撤销通知和会话。"""
+        if not getattr(self, "_media_ok", False) or not _JNIUS_OK:
+            return
+        try:
+            MediaControls = autoclass("org.audiobookreader.android.MediaControls")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            MediaControls.teardown(PythonActivity.mActivity)
+        except Exception:
+            pass
+        self._media_ok = False
+
+    def _on_media_action(self, action):
+        """通知栏按钮 / 耳机按键 → Kivy 主线程执行（回调来自系统线程）。"""
+        try:
+            from kivy.clock import Clock
+        except Exception:
+            return
+        if action == "playpause":
+            Clock.schedule_once(lambda *_: self.toggle_play(), 0)
+        elif action == "next":
+            Clock.schedule_once(lambda *_: self.jump_chapter(1), 0)
+        elif action == "prev":
+            Clock.schedule_once(lambda *_: self.jump_chapter(-1), 0)
 
     @staticmethod
     def _nav_bar_dp():

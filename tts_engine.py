@@ -123,6 +123,7 @@ class EdgeTTS:
 
     公开方法与 AndroidTTS 完全一致（main.py / ReaderTTS 都按这个接口调用）。
     """
+    CACHE_LIMIT = 200 * 1024 * 1024   # 磁盘缓存上限（字节），按 LRU 清理
 
     def __init__(self, on_progress=None, on_paragraph=None, on_state=None,
                  on_finished=None, on_error=None, on_voices=None):
@@ -408,6 +409,7 @@ class EdgeTTS:
             if not (self._cache_dir and os.path.exists(path)):
                 edge_tts_client.synthesize_to_file(
                     text, self._voice_name, path, rate=rate, pitch=pitch, volume=volume)
+                self._prune_cache(keep_path=path)
             if generation != self._generation:
                 return
             # 回主线程播放（走 Handler，不用 Clock —— 熄屏后 Clock 不触发）
@@ -467,6 +469,41 @@ class EdgeTTS:
             self.on_error("Edge 播放失败：%s" % e)
             self._advance()
 
+    def _prune_cache(self, keep_path=None):
+        """磁盘缓存超过 CACHE_LIMIT 时按 LRU（mtime 最旧先删）清理。
+
+        听长篇时每句一个 mp3 只进不出会一直涨；keep_path 是刚写入/正在
+        播放的文件，绝不删除。清理失败静默忽略（不能影响朗读）。
+        """
+        if not self._cache_dir:
+            return
+        try:
+            entries = []
+            total = 0
+            for name in os.listdir(self._cache_dir):
+                fp = os.path.join(self._cache_dir, name)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                total += st.st_size
+                entries.append((st.st_mtime, fp, st.st_size))
+            if total <= self.CACHE_LIMIT:
+                return
+            entries.sort()
+            for _mtime, fp, size in entries:
+                if total <= self.CACHE_LIMIT:
+                    break
+                if keep_path and os.path.abspath(fp) == os.path.abspath(keep_path):
+                    continue
+                try:
+                    os.remove(fp)
+                    total -= size
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
     def _on_player_complete(self, generation):
         """本句 mp3 播完（OnCompletionListener 事件，已在主线程）。
 
@@ -513,6 +550,7 @@ class EdgeTTS:
                 edge_tts_client.synthesize_to_file(
                     text, self._voice_name, path,
                     rate=rate, pitch=pitch, volume=volume)
+                self._prune_cache(keep_path=path)
             except Exception:
                 return
             finally:

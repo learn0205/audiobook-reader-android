@@ -120,6 +120,7 @@ else:                                        # 字体缺失时给个明确提示
 
 # 请求码：文件选择器
 REQUEST_PICK_BOOK = 1001
+REQUEST_EXPORT_CFG = 1002   # 导出书签/进度备份（ACTION_CREATE_DOCUMENT）
 
 KV = """
 # ============================================================
@@ -160,6 +161,7 @@ KV = """
     # 注意用 reader_font_size 而不是直接覆盖 font_size —— Label.font_size 自带
     # 'sp' 单位语义，重定义会破坏它。
     active: False
+    line_height: root.line_height_factor   # 行距系数（设置里可调，1.0=系统默认）
     font_size: str(int(root.reader_font_size)) + 'sp'
     text_size: self.width - dp(24), None
     size_hint_y: None
@@ -203,6 +205,7 @@ class ParaView(Label):
     active = BooleanProperty(False)
     index = NumericProperty(0)
     reader_font_size = NumericProperty(15)
+    line_height_factor = NumericProperty(1.0)
     bg_color = ListProperty([0, 0, 0, 0])
 
     def on_active(self, *_):
@@ -282,6 +285,7 @@ class AudioBookApp(App, WakelockFgMixin):
     sleep_text = StringProperty("")
     play_label = StringProperty("▶ 播放")
     reader_font = NumericProperty(15)
+    line_height = NumericProperty(1.0)   # 正文行距系数（1.0=系统默认，最大 2.0）
     highlight_index = NumericProperty(-1)
 
     def __init__(self, **kwargs):
@@ -329,6 +333,11 @@ class AudioBookApp(App, WakelockFgMixin):
         # ---- 前台服务（熄屏/后台朗读保活）----
         self._fg_started = False
         self._fg_error = ""
+        # ---- 通知栏媒体控制（MediaSession）----
+        self._media_ok = False
+        self._media_cb = None
+        self._media_error = ""
+        self._is_playing = False
 
     # ============================================================
     #                        启动
@@ -382,6 +391,7 @@ class AudioBookApp(App, WakelockFgMixin):
         cfg_path = os.path.join(self.user_data_dir, "config.json")
         self._config = ConfigManager(cfg_path)
         self.reader_font = float(self._config.get("font_size", 15))
+        self.line_height = max(1.0, min(2.0, float(self._config.get("line_height", 1.0))))
 
         self._engine = ReaderTTS(
             on_progress=self._on_progress,
@@ -571,6 +581,8 @@ class AudioBookApp(App, WakelockFgMixin):
         self.lbl_chapter.bind(
             size=lambda w, *_: setattr(w, "text_size", (w.width, w.height)))
         self.bind(chapter_text=lambda _i, v: setattr(self.lbl_chapter, "text", v))
+        # 章节标题变化时同步刷新通知栏标题
+        self.bind(chapter_text=lambda _i, _v: self._media_update(self._is_playing))
 
         self.lbl_sleep = Label(text=self.sleep_text, font_size="12sp",
                                size_hint_x=None, width=dp(104),
@@ -665,8 +677,8 @@ class AudioBookApp(App, WakelockFgMixin):
         return "ANDROID_ARGUMENT" in os.environ or "ANDROID_ROOT" in os.environ
 
     def _on_activity_result(self, request_code, result_code, intent):
-        """文件选择器返回：把选中的文件复制进应用私有目录再打开。"""
-        if request_code != REQUEST_PICK_BOOK:
+        """SAF 选择器返回：书本 → 复制后打开；.json → 备份导入；导出码 → 落盘。"""
+        if request_code not in (REQUEST_PICK_BOOK, REQUEST_EXPORT_CFG):
             return
         try:
             from android import activity
@@ -679,6 +691,24 @@ class AudioBookApp(App, WakelockFgMixin):
             uri = intent.getData()
             if uri is None:
                 return
+            if request_code == REQUEST_EXPORT_CFG:
+                content = self._config.export_data()
+                ok = self._write_uri_text(uri, content)
+                self._post_to_main(lambda: self._toast("备份已导出" if ok else "导出失败"))
+                return
+            # 打开书本 / 导入备份：按扩展名分流
+            resolver = None
+            try:
+                from jnius import autoclass as _ac
+                PythonActivity = _ac("org.kivy.android.PythonActivity")
+                resolver = PythonActivity.mActivity.getContentResolver()
+            except Exception:
+                pass
+            name = (self._query_display_name(resolver, uri) if resolver else "") or ""
+            if name.lower().endswith(".json"):
+                data = self._read_uri_text(uri)
+                self._post_to_main(lambda: self._import_backup(data))
+                return
             path = self._copy_uri_to_private(uri)
             if path:
                 # ⚠️ 这个回调不在 Kivy 主线程上；open_book 会创建控件（图形指令），
@@ -689,6 +719,102 @@ class AudioBookApp(App, WakelockFgMixin):
         except Exception as err:
             # 走 _on_error：既弹 toast，也记进「自检信息 → 最近错误」（便于截图定位）
             self._on_error(f"读取所选文件失败：{err}")
+
+    def _import_backup(self, data):
+        """恢复书签/进度备份（必须在 Kivy 主线程：会刷新界面）。"""
+        try:
+            self._config.import_data(data)
+            self._toast("备份已恢复，重启应用后完全生效")
+        except Exception as err:
+            self._toast(f"备份导入失败：{err}")
+
+    def _read_uri_text(self, uri):
+        """读 SAF content:// 的文本内容（openFileDescriptor + dup）。"""
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        resolver = PythonActivity.mActivity.getContentResolver()
+        pfd = resolver.openFileDescriptor(uri, "r")
+        try:
+            with os.fdopen(os.dup(pfd.getFd()), encoding="utf-8") as f:
+                return f.read()
+        finally:
+            try:
+                pfd.close()
+            except Exception:
+                pass
+
+    def _write_uri_text(self, uri, text):
+        """把文本写进 SAF content://（导出备份用）。成功返回 True。"""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            pfd = resolver.openFileDescriptor(uri, "w")
+            try:
+                with os.fdopen(os.dup(pfd.getFd()), "w", encoding="utf-8") as f:
+                    f.write(text)
+            finally:
+                try:
+                    pfd.close()
+                except Exception:
+                    pass
+            return True
+        except Exception as err:
+            self._on_error(f"导出失败：{err}")
+            return False
+
+    def _export_backup(self):
+        """导出书签/进度备份（系统「另存为」对话框）。"""
+        if not self._android():
+            self._toast("桌面环境直接复制 config.json 即可")
+            return
+        try:
+            from android import activity
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            it = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            it.addCategory(Intent.CATEGORY_OPENABLE)
+            it.setType("application/json")
+            it.putExtra(Intent.EXTRA_TITLE, "audiobook_backup.json")
+            activity.bind(on_activity_result=self._on_activity_result)
+            PythonActivity.mActivity.startActivityForResult(it, REQUEST_EXPORT_CFG)
+        except Exception as err:
+            self._toast(f"导出失败：{err}")
+
+    def _share_diag_log(self):
+        """把 diag.log（含最近崩溃）以纯文本分享出去，方便反馈问题。"""
+        content = ""
+        try:
+            with open(_DIAG.get("path", ""), encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            pass
+        try:
+            with open(_CRASH.get("path", ""), encoding="utf-8") as f:
+                crash = f.read()
+            if crash:
+                content += chr(10) + "---- 崩溃记录 ----" + chr(10) + crash
+        except Exception:
+            pass
+        if not content.strip():
+            content = "(日志为空)"
+        content = content[-8000:]      # Intent 太大系统会拒，截尾保留最近的
+        if not self._android():
+            self._toast("桌面日志文件：" + (_DIAG.get("path") or "-"))
+            return
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            send = Intent(Intent.ACTION_SEND)
+            send.setType("text/plain")
+            send.putExtra(Intent.EXTRA_SUBJECT, "AudioBookReader 诊断日志")
+            send.putExtra(Intent.EXTRA_TEXT, content)
+            PythonActivity.mActivity.startActivity(
+                Intent.createChooser(send, "分享诊断日志"))
+        except Exception as err:
+            self._toast(f"分享失败：{err}")
 
     def _copy_uri_to_private(self, uri):
         """把 SAF 的 content:// 复制成本地文件，返回新路径。
@@ -870,6 +996,7 @@ class AudioBookApp(App, WakelockFgMixin):
                 text=self._paragraphs[g],
                 index=g - cstart,              # 章内下标，不是全书下标
                 reader_font_size=self.reader_font,
+                line_height_factor=self.line_height,
             ))
         # 换章后先把滚动位置顶到最上：否则会残留上一章居中时设的 scroll_y，
         # 若新章内容比视口短，Kivy 会把内容贴到底部，上方留出一大片黑
@@ -1285,8 +1412,26 @@ class AudioBookApp(App, WakelockFgMixin):
         # 用引擎实测的语速（倍速 1.0 基准）乘以当前倍速估算，比硬编码准得多
         cps = max(0.5, self._engine.get_cps()) * speed
         total_sec = span / cps
-        self.progress_text = "本章 %s / %s  %.1f%%" % (
-            self._fmt(fraction * total_sec), self._fmt(total_sec), fraction * 100)
+        # 全书进度 + 全书剩余时间预估（按实测语速；没打开书/边界时省略）
+        book_pct = (char_pos / float(total)) * 100 if total else 0.0
+        remain = max(0, total - char_pos) / cps
+        remain_s = ("剩约 %s" % self._fmt_hm(remain)) if remain > 60 else ""
+        self.progress_text = "本章 %s/%s %.0f%%  ·全书 %.0f%%%s" % (
+            self._fmt(fraction * total_sec), self._fmt(total_sec),
+            fraction * 100, book_pct,
+            ("  ·" + remain_s) if remain_s else "")
+
+    @staticmethod
+    def _fmt_hm(seconds):
+        """把秒数格式化成「X小时Y分 / Y分Z秒」的紧凑可读形式。"""
+        seconds = max(0, int(seconds))
+        h, rem = divmod(seconds, 3600)
+        m, sec = divmod(rem, 60)
+        if h:
+            return "%d小时%02d分" % (h, m)
+        if m:
+            return "%d分%02d秒" % (m, sec)
+        return "%d秒" % sec
 
     @staticmethod
     def _fmt(seconds):
@@ -1312,13 +1457,18 @@ class AudioBookApp(App, WakelockFgMixin):
     def _on_state(self, state):
         # 播放时：持有 PARTIAL_WAKE_LOCK + 启动前台服务（熄屏/后台不冻结）；
         # 非播放态释放 wakelock，彻底停止时再关掉前台服务（暂停时保留，续播更快）。
+        self._is_playing = (state == STATE_PLAYING)
         if state == STATE_PLAYING:
             self._acquire_wake()
             self._start_fg_service()
+            self._media_setup()
+            self._media_update(True)
         else:
+            self._media_update(False)
             self._release_wake()
             if state == STATE_STOPPED:
                 self._stop_fg_service()
+                self._media_teardown()
 
         def _apply(_dt):
             self.play_label = "‖ 暂停" if state == STATE_PLAYING else "▶ 播放"
@@ -1659,7 +1809,7 @@ class AudioBookApp(App, WakelockFgMixin):
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
-            "监听器 %s\n"
+            "监听器 %s   媒体控制 %s\n"
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
             "引擎 %s\n"
@@ -1669,6 +1819,9 @@ class AudioBookApp(App, WakelockFgMixin):
             "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                _utter_ok,
+               ("已挂" if self._media_ok
+                else ("未挂 " + self._media_error) if self._media_error
+                else "未挂"),
                "已持有" if self._wake_lock is not None else "未持有",
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",
@@ -1732,6 +1885,12 @@ class AudioBookApp(App, WakelockFgMixin):
         box.add_widget(self._slider_row("字号", 10, 30,
                                         int(self._config.get("font_size", 15)),
                                         self._on_font))
+
+        # ---- 行距 ----
+        box.add_widget(self._slider_row("行距", 10, 20,
+                                        int(round(self.line_height * 10)),
+                                        self._on_line_height,
+                                        fmt=lambda v: "%.1fx" % (v / 10.0)))
 
         # ---- 定时休眠 ----
         sleep_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
@@ -1801,6 +1960,20 @@ class AudioBookApp(App, WakelockFgMixin):
         btn_stop.bind(on_release=_do_stop)
         box.add_widget(btn_stop)
 
+        # ---- 备份 / 诊断 ----
+        tools_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        btn_export = Button(text="导出书签/进度", size_hint_x=1,
+                            background_normal="", background_color=C_BTN,
+                            color=(1, 1, 1, 1), font_size="13sp")
+        btn_export.bind(on_release=lambda *_: self._export_backup())
+        btn_share_log = Button(text="分享诊断日志", size_hint_x=1,
+                               background_normal="", background_color=C_BTN,
+                               color=(1, 1, 1, 1), font_size="13sp")
+        btn_share_log.bind(on_release=lambda *_: self._share_diag_log())
+        tools_row.add_widget(btn_export)
+        tools_row.add_widget(btn_share_log)
+        box.add_widget(tools_row)
+
         btn_close = Button(text="关闭", size_hint_y=None, height=dp(46),
                            background_normal="", background_color=C_PRIMARY,
                            color=(1, 1, 1, 1))
@@ -1852,6 +2025,18 @@ class AudioBookApp(App, WakelockFgMixin):
         for widget in self._text_box.children:
             widget.reader_font_size = size
         # 字号变了每段高度都变，重算一下滚动位置，别让当前段跑出视野
+        self._scroll_to_local(self.highlight_index - self._view_start)
+
+    def _on_line_height(self, value):
+        """调整正文行距（1.0~2.0 倍）。同字号：直接改子控件属性即可，
+        line_height 变化会带动 texture_size 重算，段落高度自动更新。"""
+        lh = max(1.0, min(2.0, float(value)))
+        self.line_height = lh
+        self._config.set("line_height", round(lh, 2))
+        if self._text_box is None:
+            return
+        for widget in self._text_box.children:
+            widget.line_height_factor = lh
         self._scroll_to_local(self.highlight_index - self._view_start)
 
     def _apply_font_refresh(self, *_):

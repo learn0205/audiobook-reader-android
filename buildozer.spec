@@ -49,8 +49,9 @@ icon.filename = %(source.dir)s/icon.png
 # ---------------------------------------------------------------------------
 android.archs = arm64-v8a
 
-# Android 版本：minapi 24 = Android 7.0，api 33 = Android 13
-android.api = 33
+# Android 版本：minapi 24 = Android 7.0，target/compile api 34 = Android 14
+# （Google Play 2024 起要求 targetSdk 34+；p4a develop 已兼容）
+android.api = 34
 android.minapi = 24
 
 # 自定义 Java 源码目录：TTSProgressListener/Callback 随 APK 编译进 classes.dex。

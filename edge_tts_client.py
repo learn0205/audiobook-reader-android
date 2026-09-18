@@ -55,12 +55,18 @@ WIN_EPOCH = 11644473600          # 1601-01-01 起的秒数
 S_TO_NS = 1e9
 
 
+# 服务器时间 - 本地时间（秒）。握手被 401/403 拒绝时从响应头 Date 自动校正：
+# Sec-MS-GEC 按本地时间算，手机时间不准（快/慢几分钟）就会持续 401 且极难排查。
+_CLOCK_SKEW = 0.0
+
+
 def _generate_sec_ms_gec():
     """生成 Sec-MS-GEC 令牌：当前时间（Windows 文件时间，向下取整 5 分钟）拼接 token 后 SHA256。
 
-    与官方 edge-tts 的 DRM.generate_sec_ms_gec() 完全等价（忽略时钟偏差）。
+    与官方 edge-tts 的 DRM.generate_sec_ms_gec() 等价，另加时钟偏差补偿
+    （_CLOCK_SKEW，401/403 后从响应头 Date 自动学习）。
     """
-    ticks = time.time() + WIN_EPOCH
+    ticks = time.time() + _CLOCK_SKEW + WIN_EPOCH
     ticks -= ticks % 300                       # 向下取整到最近 5 分钟
     ticks *= S_TO_NS / 100                     # 转成 100 纳秒间隔
     s = f"{ticks:.0f}{_TRUSTED_CLIENT_TOKEN}"
@@ -175,6 +181,26 @@ def _js_date():
             + " (Coordinated Universal Time)")
 
 
+def _learn_clock_skew(header_text):
+    """从 HTTP 响应头 Date 学习「服务器时间 - 本地时间」的偏差（秒）。
+
+    手机本地时间不准时 Sec-MS-GEC 会被持续拒绝；官方客户端依赖系统时间，
+    这里更进一步：直接信服务器。
+    """
+    global _CLOCK_SKEW
+    try:
+        import email.utils
+        sep = chr(13) + chr(10)
+        for line in header_text.split(sep):
+            if line.lower().startswith("date:"):
+                server = email.utils.parsedate_to_datetime(
+                    line.split(":", 1)[1].strip())
+                _CLOCK_SKEW = round(server.timestamp() - time.time())
+                return
+    except Exception:
+        pass
+
+
 def _ws_handshake(ssock, conn_id):
     """完成 WebSocket 握手，返回 (use_deflate: bool)。
 
@@ -217,6 +243,13 @@ def _ws_handshake(ssock, conn_id):
     header_text = header_blob.decode("ascii", "ignore")
     status_line = header_text.split("\r\n", 1)[0]
     if "101" not in status_line:
+        # 401/403：十有八九是本地时钟不准导致令牌被拒。用响应头 Date 反推
+        # 偏差存进 _CLOCK_SKEW，synthesize() 的重试就会带上正确令牌。
+        if ("401" in status_line) or ("403" in status_line):
+            _learn_clock_skew(header_text)
+            raise RuntimeError(
+                "Edge TTS 鉴权被拒(401/403)，已按服务器时间自动校正时钟偏差"
+                "（偏差 %.0f 秒），正在重试" % _CLOCK_SKEW)
         raise RuntimeError("Edge TTS WebSocket 握手失败: " + status_line)
     low = header_text.lower()
     use_deflate = ("sec-websocket-extensions" in low

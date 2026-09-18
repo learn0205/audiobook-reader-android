@@ -70,6 +70,23 @@ class ConfigManager:
         except Exception as err:
             print(f"[配置] 读取失败，使用默认配置：{err}")
 
+    def export_data(self) -> str:
+        """把整份配置序列化成 JSON 文本（书签/断点备份导出用）。"""
+        with self._lock:
+            return json.dumps(self._data, ensure_ascii=False, indent=2)
+
+    def import_data(self, text: str):
+        """从备份 JSON 恢复配置（整体替换后落盘）。
+
+        只接受 dict；结构不合法的条目由各 get() 的默认值兜底。
+        """
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("备份文件格式不对（顶层不是 JSON 对象）")
+        with self._lock:
+            self._data = data
+        self.save()
+
     def save(self):
         """原子化写盘：先写临时文件再替换，防止写一半断电损坏配置。"""
         with self._lock:

@@ -12,7 +12,7 @@ from kivy.clock import Clock
 def check(tag):
     b, t = app._body, app._top_w
     gap = (b.y + b.height) - t.y
-    ok = abs(gap) < 1 and b.height > 100 and b.y > 100
+    ok = abs(gap) < 1 and b.height > 100 and b.y > 100 and abs(app._scroll.y - b.y) < 1
     print(f"[{tag}] body.h={b.height:.0f} body.y={b.y:.0f} gap={gap:.1f} fixes={app._layout_fixes} -> {'OK' if ok else 'FAIL'}")
     return ok
 
