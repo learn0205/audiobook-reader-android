@@ -525,6 +525,10 @@ class AudioBookApp(App):
             try:
                 self._text_box.height = max(self._text_box.minimum_height,
                                             self._scroll.height)
+                # ⚠️ ScrollView 改 scroll_y 时不会自动重算 g_translate.y（g_translate
+                # 是按 Kivy 内部规则累加的）—— 必须显式调 update_from_scroll() 才能让
+                # 「顶部黑空区」消失（症状：gty 不等于 sv.y-(content-vp)）。
+                self._scroll.update_from_scroll()
             except Exception:
                 pass
 
