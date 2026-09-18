@@ -667,7 +667,11 @@ class AudioBookApp(App):
                 return
             path = self._copy_uri_to_private(uri)
             if path:
-                self.open_book(path)
+                # ⚠️ 这个回调不在 Kivy 主线程上；open_book 会创建控件（图形指令），
+                #    必须投递回主线程，否则抛
+                #    "Cannot create graphics instruction outside the main Kivy thread"
+                #    → 正文渲染做一半 → 顶部出现黑色空区。
+                self._post_to_main(lambda: self.open_book(path))
         except Exception as err:
             # 走 _on_error：既弹 toast，也记进「自检信息 → 最近错误」（便于截图定位）
             self._on_error(f"读取所选文件失败：{err}")
@@ -1413,6 +1417,23 @@ class AudioBookApp(App):
 
         self._tick_thread = threading.Thread(target=_loop, daemon=True)
         self._tick_thread.start()
+
+    def _post_to_main(self, fn):
+        """把 fn 投递到 Kivy 主线程执行（有 Handler 用 Handler，否则用 Clock）。
+
+        ⚠️ 为什么必须有这个：**创建 Kivy 控件/图形指令必须在主线程**。
+        选文件的 SAF 回调不在主线程上，如果直接在里面 open_book（会创建
+        ParaView 等带 canvas 指令的控件），Kivy 会抛
+            Cannot create graphics instruction outside the main Kivy thread
+        导致正文渲染做一半、布局异常（表现为顶部一片黑的空区）。
+        """
+        if self._handler is not None:
+            try:
+                self._handler.post(_TickRunnable(fn))
+                return
+            except Exception:
+                pass
+        Clock.schedule_once(lambda _dt: fn(), 0)
 
     def _post_tick(self):
         """把 _tick 投到主线程；桌面无 Handler 时退回 Kivy Clock。"""
