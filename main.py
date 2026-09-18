@@ -47,7 +47,9 @@ from kivy.uix.slider import Slider
 from book_parser import BookParseError
 from book_parser import load_book as parse_book_file
 from config_manager import ConfigManager
-from tts_android import STATE_PAUSED, STATE_PLAYING
+# ⚠️ STATE_STOPPED 也必须导入：_on_state 里用它决定「是否关闭前台服务」。
+#    漏了它会抛 NameError，而异常从按钮回调冒出 → Kivy 重新抛出 → **一点暂停就闪退**。
+from tts_android import STATE_PAUSED, STATE_PLAYING, STATE_STOPPED
 from tts_engine import ReaderTTS
 
 # ---- 构建标识（CI 打包时由 .github/workflows/build-apk.yml 写入）----
@@ -553,10 +555,6 @@ class AudioBookApp(App):
         # ---- 进度区（按章进度，参照番茄小说） ----
         prog_box = BoxLayout(orientation="vertical", size_hint_y=None,
                              height=dp(78), padding=[dp(10), 0])
-        # 不透明底色：个别设备上 ScrollView 不裁剪、正文会溢出到这两条区域，
-        # 从控件缝隙里透出来（看起来就是「进度条/按钮压住了字」）。加底色盖住。
-        self._paint_bg(prog_box, C_BG)
-
         # 第一行：当前章节名 + 定时休眠倒计时
         head_row = BoxLayout(size_hint_y=None, height=dp(20))
         self.lbl_chapter = Label(text=self.chapter_text, font_size="12sp",
@@ -603,7 +601,6 @@ class AudioBookApp(App):
         _nav = getattr(self, "_nav_dp", 0)
         ctrl = BoxLayout(size_hint_y=None, height=dp(58) + dp(_nav), spacing=dp(8),
                          padding=[dp(12), dp(5), dp(12), dp(5) + dp(_nav)])
-        self._paint_bg(ctrl, C_BG)
         self.btn_prev_ch = Button(text="◀◀ 上一章",
                                   background_color=C_BTN, color=C_TEXT,
                                   font_size="13sp")
@@ -1572,22 +1569,6 @@ class AudioBookApp(App):
             self._toast("无法打开系统设置：%s" % e)
 
     @staticmethod
-    def _paint_bg(widget, color):
-        """给控件加一层不透明底色（随控件位置/尺寸自适应）。
-
-        为什么需要：个别安卓设备上 ScrollView 的裁剪（stencil）不生效，
-        正文内容会溢出到下方的进度区/按钮区，从控件之间的缝隙透出来，
-        看起来就是「进度条和按钮压住了字」。给底部这两条加不透明底色，
-        任何溢出都会被盖住。
-        """
-        from kivy.graphics import Color, Rectangle
-        with widget.canvas.before:
-            Color(*color)
-            rect = Rectangle(pos=widget.pos, size=widget.size)
-        widget.bind(pos=lambda w, v: setattr(rect, "pos", v),
-                    size=lambda w, v: setattr(rect, "size", v))
-
-    @staticmethod
     def _nav_bar_dp():
         """安卓系统导航栏高度（dp）：手势条 / 三键导航都会压住应用底部。
 
@@ -1792,10 +1773,11 @@ class AudioBookApp(App):
             _kids = self._text_box.children
             _gt = getattr(self._scroll, "g_translate", None)
             _gty = int(round(_gt.xy[1])) if _gt is not None else -99999
-            _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d sv.y=%.0f "
+            _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d sv.y=%.0f body=%.0f "
                        "p0h=%.0f n=%d") % (
                 self._scroll.height, self._text_box.height,
                 self._scroll.scroll_y, _gty, self._scroll.y,
+                getattr(self._body, "height", -1),
                 (_kids[-1].height if _kids else -1), len(_kids))
         except Exception:
             _layout = "-"
