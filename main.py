@@ -408,30 +408,16 @@ class AudioBookApp(App, WakelockFgMixin):
         self._start_tick_loop()
         return root
 
-    def _reflow(self, *_):
-        # device 上 Kivy BoxLayout vertical 排列方向反了，改用绝对定位手动排 4 个子。
-        # ⚠️ body 高度只能从 parent 高度和上下两行算出来，绝不能引用 body 自己的
-        #    height —— 以前 `_y -= self._body.height` 让 _body_h 依赖旧值，而改
-        #    body.size 又触发 size 绑定再次调用 _reflow，高度在负值/全屏间交替，
-        #    无限递归直到栈溢出（启动第一帧就卡死/段错误）。
-        try:
-            _W = self._body.parent.width
-            _H = self._body.parent.height
-            _top_h = self._top_w.height
-            _prog_h = self._prog_box.height
-            _ctrl_h = self._ctrl.height
-            _body_h = max(0, _H - _top_h - _prog_h - _ctrl_h)
-            self._top_w.pos = (0, _H - _top_h); self._top_w.size = (_W, _top_h)
-            # 正文区严格夹在顶栏之下、进度条+控制条之上
-            self._body.pos = (0, _prog_h + _ctrl_h); self._body.size = (_W, _body_h)
-            self._prog_box.pos = (0, _ctrl_h); self._prog_box.size = (_W, _prog_h)
-            self._ctrl.pos = (0, 0); self._ctrl.size = (_W, _ctrl_h)
-        except Exception:
-            pass
-
     def _build_ui(self):
         """用 Python 拼布局（比 KV 更容易精确控制移动端尺寸）。"""
-        root = FloatLayout()  # device 上 BoxLayout vertical 排列方向反了，改用绝对定位
+        # 标准 Kivy BoxLayout(vertical)：children[0] 排最**底**、后添加的排上面
+        # （kivy/uix/boxlayout.py 的 _iterate_layout 从 padding_bottom 起步向上排）。
+        # 按「顶栏→正文→进度→控制条」的顺序添加，顶栏自然在最上、正文紧贴其下。
+        # ⚠️ 别再换 FloatLayout+绝对定位手动排位：那套在设备上 body.y 会被布局
+        #    复位成 0（自检 bTop=body 高度、gap=底部两行总高），表现为顶部约
+        #    1/4 黑区 + 正文穿透进度条/按钮行；BoxLayout 由 Kivy 排，不会复发。
+        #    （当年「device 上方向反了」是把 g_translate 黑区误诊成了排列反转。）
+        root = BoxLayout(orientation="vertical")
         # 系统导航栏高度（手势条/三键）：折算进最底排控制条，避免按钮被系统条压住
         self._nav_dp = self._nav_bar_dp()
 
@@ -477,7 +463,7 @@ class AudioBookApp(App, WakelockFgMixin):
         # 番茄小说也是按章加载的。单章中位 130 段、最多 400 段，
         # 用普通控件即可，而且高度由 Kivy 自动算准
         # （RecycleView 对「高度不定的文本条目」反而算不准）。
-        body = FloatLayout(size_hint_y=None)  # 高度由 _reflow 精确算出（见下）
+        body = FloatLayout(size_hint_y=1)  # BoxLayout 会把它撑到占满中间剩余空间
         # 双重保险：body 自己画上 C_BG。即便 Window.clearcolor 没生效或被覆盖，
         # 正文区里的空白也显示为深灰（页面背景），不会再露 Window 默认纯黑。
         from kivy.graphics import Color, Rectangle
@@ -603,16 +589,6 @@ class AudioBookApp(App, WakelockFgMixin):
         ctrl.add_widget(self.btn_set)
         self._ctrl = ctrl
         root.add_widget(ctrl)
-        # ★ device 上 Kivy BoxLayout vertical 排列方向反了（children[0] 排最顶部），
-        # body 没紧接 top、整段 660px 黑空区。改用绝对定位手动排 4 个子。
-        # ★ device 上 Kivy BoxLayout vertical 排列方向反了（children[0] 排最顶部），
-        # body 没紧接 top。改用绝对定位 _reflow 手动排 4 个子：
-        # 顶栏在最上 → 正文紧贴顶栏下沿 → 进度条 → 控制条（含系统导航栏高度）。
-        # body 的 size_hint_y=None，FloatLayout 的 do_layout 不会动它的位置/尺寸，
-        # 所以只需在 root 尺寸变化时重排一次，无需再靠 body.size 绑定自我纠正
-        # （那个绑定 + 依赖 body.height 的算法曾造成无限递归 → 启动卡死）。
-        self._body.parent.bind(size=self._reflow, pos=self._reflow)
-        Clock.schedule_once(self._reflow, 0)
         return root
 
     # ============================================================
