@@ -408,9 +408,28 @@ class AudioBookApp(App, WakelockFgMixin):
         self._start_tick_loop()
         return root
 
+    def _reflow(self, *_):
+        # device 上 Kivy BoxLayout vertical 排列方向反了，改用绝对定位手动排 4 个子
+        try:
+            _W = self._body.parent.width
+            _H = self._body.parent.height
+            _y = _H
+            _y -= self._top_w.height
+            self._top_w.pos = (0, _y); self._top_w.size = (_W, self._top_w.height)
+            _y -= self._body.height
+            _body_h = _y - self._prog_box.height - self._ctrl.height
+            self._body.pos = (0, _y); self._body.size = (_W, _body_h)
+            self._body.height = _body_h  # 显式 height（防 Kivy 在 do_layout 时按 parent 覆盖）
+            _y -= self._prog_box.height
+            self._prog_box.pos = (0, _y); self._prog_box.size = (_W, self._prog_box.height)
+            _y -= self._ctrl.height
+            self._ctrl.pos = (0, _y); self._ctrl.size = (_W, self._ctrl.height)
+        except Exception:
+            pass
+
     def _build_ui(self):
         """用 Python 拼布局（比 KV 更容易精确控制移动端尺寸）。"""
-        root = BoxLayout(orientation="vertical")
+        root = FloatLayout()  # device 上 BoxLayout vertical 排列方向反了，改用绝对定位
         # 系统导航栏高度（手势条/三键）：折算进最底排控制条，避免按钮被系统条压住
         self._nav_dp = self._nav_bar_dp()
 
@@ -466,6 +485,7 @@ class AudioBookApp(App, WakelockFgMixin):
         body.bind(pos=lambda w, v: setattr(rect, "pos", v),
                   size=lambda w, v: setattr(rect, "size", v))
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
+        self._top_w = top
         # ★ 强制：body 紧接顶栏下方（防 root 没填满 window、或 BoxLayout 把 body
         # 推到了异常位置 —— 上一次诊断显示正文区离顶栏 660px 才出现"黑空区"）
         try:
@@ -557,6 +577,7 @@ class AudioBookApp(App, WakelockFgMixin):
         prog_box.add_widget(head_row)
         prog_box.add_widget(self.slider)
         prog_box.add_widget(self.lbl_progress)
+        self._prog_box = prog_box
         root.add_widget(prog_box)
 
         # ---- 控制行：上一章 / 播放-暂停 / 下一章 ----
@@ -585,7 +606,15 @@ class AudioBookApp(App, WakelockFgMixin):
         ctrl.add_widget(self.btn_play)
         ctrl.add_widget(self.btn_next_ch)
         ctrl.add_widget(self.btn_set)
+        self._ctrl = ctrl
         root.add_widget(ctrl)
+        # ★ device 上 Kivy BoxLayout vertical 排列方向反了（children[0] 排最顶部），
+        # body 没紧接 top、整段 660px 黑空区。改用绝对定位手动排 4 个子。
+        self._body.parent.bind(size=self._reflow, pos=self._reflow)
+        Clock.schedule_once(self._reflow, 0)
+        # 额外保险：body 自己 size 变化时也强制 _reflow（Kivy do_layout 会把 body.size
+        # 改回 parent.size = 800，必须每次纠正）
+        self._body.bind(size=lambda w, v: self._reflow())
         return root
 
     # ============================================================
