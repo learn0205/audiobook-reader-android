@@ -466,6 +466,13 @@ class AudioBookApp(App, WakelockFgMixin):
         body.bind(pos=lambda w, v: setattr(rect, "pos", v),
                   size=lambda w, v: setattr(rect, "size", v))
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
+        # ★ 强制：body 紧接顶栏下方（防 root 没填满 window、或 BoxLayout 把 body
+        # 推到了异常位置 —— 上一次诊断显示正文区离顶栏 660px 才出现"黑空区"）
+        try:
+            _top = max(body.parent.children, key=lambda c: c.y)
+            body.y = _top.height
+        except Exception:
+            pass
         self._scroll = self._make_scroll()
         # 顶部留白 = 两倍 15 号字（2 × sp(15) = sp(30)）：
         # 强制正文内容从「界面顶端往下 30 字号」处开始展示，其余布局随之对齐。
@@ -1548,23 +1555,27 @@ class AudioBookApp(App, WakelockFgMixin):
         # ⚠️ Kivy 的 ScrollView 不是移动子控件坐标，而是用 canvas 的 g_translate
         # 平移 —— 所以要看 gty（实际位移），而不是 tb.y（恒为 0）。
         try:
-            _kids = self._text_box.children
             _gt = getattr(self._scroll, "g_translate", None)
             _gty = int(round(_gt.xy[1])) if _gt is not None else -99999
-            # gap = 视口顶部 - 内容顶部；>0 说明上方有一段没内容（即黑区）
-            _gap = int(round((self._scroll.y + self._scroll.height)
-                             - (_gty + self._text_box.height)))
             try:
                 from kivy.core.window import Window as _W
                 _wh = int(_W.height)
+                # 正文区、顶栏底部在 window 中的实际像素 y
+                _b_top_y = int(self._body.to_window(0, self._body.height)[1])
+                _root = self._body.parent
+                _top_w = max(_root.children, key=lambda c: c.to_window(0, c.height)[1])
+                _t_bot_y = int(_top_w.to_window(0, 0)[1])
+                _root_h = int(_root.height)
+                _root_y = int(_root.to_window(0, _root.height)[1])
             except Exception:
-                _wh = -1
-            _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d sv.y=%.0f body=%.0f "
-                       "winH=%d gap=%d p0h=%.0f n=%d") % (
+                _wh = _b_top_y = _t_bot_y = _root_h = _root_y = -1
+            _gap_px = -1 if _b_top_y < 0 or _t_bot_y < 0 else (_b_top_y - _t_bot_y)
+            _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d body=%.0f winH=%d "
+                       "rootH=%d rootY=%d tBot=%d bTop=%d gap2=%d") % (
                 self._scroll.height, self._text_box.height,
-                self._scroll.scroll_y, _gty, self._scroll.y,
-                getattr(self._body, "height", -1), _wh, _gap,
-                (_kids[-1].height if _kids else -1), len(_kids))
+                self._scroll.scroll_y, _gty,
+                getattr(self._body, "height", -1), _wh, _root_h, _root_y,
+                _t_bot_y, _b_top_y, _gap_px)
         except Exception:
             _layout = "-"
         # 上次打开的书 + 已存断点（验证「记忆功能」是否生效）
