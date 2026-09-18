@@ -62,6 +62,31 @@ else:
         pass
 
 
+if _JNIUS_OK:
+    class _PlayerCompletion(PythonJavaClass):
+        """MediaPlayer 播完事件监听器（OnCompletionListener 是接口，pyjnius 可实现）。
+
+        有了它，句尾不再等 0.2s 轮询才发现「播完了」，事件一到立刻推进；
+        回调从 MediaPlayer 的事件线程投递回主线程再处理。
+        """
+        __javainterfaces__ = ["android/media/MediaPlayer$OnCompletionListener"]
+        __javacontext__ = "app"
+
+        def __init__(self, owner, generation):
+            super().__init__()
+            self.owner = owner
+            self.generation = generation
+
+        @java_method("(Landroid/media/MediaPlayer;)V")
+        def onCompletion(self, mp):
+            owner = self.owner
+            gen = self.generation
+            _post_to_main(lambda: owner._on_player_complete(gen))
+else:
+    class _PlayerCompletion(object):   # pragma: no cover
+        pass
+
+
 _MAIN_HANDLER = [None]
 
 
@@ -142,6 +167,7 @@ class EdgeTTS:
         self._cache_dir = ""
         self._synth_thread = None
         self._synthesizing = False   # 当前句是否在后台合成（合成本完成前绝不按超时推进）
+        self._prefetch_inflight = set()   # 预取中的缓存键（去重，防止同句并发合成）
         self._ready = True           # Edge 不需要离线初始化，构造即可用
         self._init_error = ""
 
@@ -407,6 +433,10 @@ class EdgeTTS:
         if generation != self._generation:
             return
         self._stop_player()
+        # 本句 mp3 已完整落盘，起播前就开预取（不会与当前播放抢网络）；
+        # 桌面无播放器的逻辑测试同样走这条路径。
+        threading.Thread(target=self._prefetch_ahead,
+                         args=(self._index, generation), daemon=True).start()
         if not _JNIUS_OK:
             # 桌面环境无播放器，直接按预估时长推进（仅用于逻辑测试）
             self._synthesizing = False
@@ -419,6 +449,11 @@ class EdgeTTS:
             # 显式塞 java.lang.String 避免 pyjnius 选错重载（与 tts_android 同款坑）
             jpath = autoclass("java.lang.String")(path)
             player.setDataSource(jpath)
+            # 播完即时推进：MediaPlayer 播完事件走监听器（pyjnius 可实现接口），
+            # 不再等 0.2s 一次的 poll_advance 轮询发现「不播了」——
+            # 这个轮询延迟是句间停顿的组成部分之一。
+            self._completion_cb = _PlayerCompletion(self, generation)
+            player.setOnCompletionListener(self._completion_cb)
             player.prepare()       # 短 mp3，同步 prepare 可接受
             player.start()
             self._player = player
@@ -431,6 +466,57 @@ class EdgeTTS:
             self._spoken_uid = None
             self.on_error("Edge 播放失败：%s" % e)
             self._advance()
+
+    def _on_player_complete(self, generation):
+        """本句 mp3 播完（OnCompletionListener 事件，已在主线程）。
+
+        立即推进下一句 —— 这是消除句间停顿的关键路径；
+        poll_advance 轮询保留作兜底（_spoken_uid 清空后它自然不再推进）。
+        """
+        if generation != self._generation or self._state != STATE_PLAYING:
+            return
+        self._stop_player()
+        self._seen_playing = True
+        if self._spoken_uid is None:
+            return
+        self._complete_current()
+
+    def _prefetch_ahead(self, sent_index, generation):
+        """播放当前句期间，后台预合成接下来的 2 句。
+
+        Edge 是逐句合成 mp3：以前播完本句才发现下一句要**现合成**，
+        一次网络往返（0.3~2s）全部变成了标点后的静音 —— 这就是
+        「某些符号（。！？…；切分点）后停顿特别长」的大头。
+        预取后推进时基本命中缓存。任何异常都直接放弃本次预取
+        （网络抖动不该刷屏，推进时还有兜底合成）。"""
+        if not (self._cache_dir and self._voice_name):
+            return
+        for k in (1, 2):
+            if generation != self._generation:
+                return
+            idx = sent_index + k
+            if idx >= len(self._sentences):
+                return
+            sentence = self._sentences[idx][1]
+            if not sentence.strip():
+                continue
+            path = self._cache_path(sentence)
+            if os.path.exists(path):
+                continue
+            key = os.path.basename(path)
+            if key in self._prefetch_inflight:
+                continue
+            self._prefetch_inflight.add(key)
+            try:
+                import edge_tts_client
+                text, rate, pitch, volume = self._synth_text_for(sentence)
+                edge_tts_client.synthesize_to_file(
+                    text, self._voice_name, path,
+                    rate=rate, pitch=pitch, volume=volume)
+            except Exception:
+                return
+            finally:
+                self._prefetch_inflight.discard(key)
 
     def _stop_player(self):
         if self._player is not None:

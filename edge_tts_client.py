@@ -464,9 +464,18 @@ def synthesize(text, voice, rate="+0%", pitch="+0Hz", volume="+0%",
 
 
 def synthesize_to_file(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
+    """合成并落盘。⚠️ 必须先写临时文件再原子 replace：
+
+    有了预取之后，会出现「预取线程正在写下一句、而播完本句的即时推进
+    检查到该缓存文件已存在（其实是半截）就拿来播」的竞态 —— MediaPlayer
+    prepare 到残缺 mp3 会直接报错。临时文件 + os.replace 保证任何时刻
+    缓存路径上的文件都是完整的。
+    """
     data = synthesize(text, voice, rate, pitch, volume)
-    with open(path, "wb") as f:
+    tmp = path + ".part%d" % threading.get_ident()
+    with open(tmp, "wb") as f:
         f.write(data)
+    os.replace(tmp, path)
     return len(data)
 
 
