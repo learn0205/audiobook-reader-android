@@ -1419,20 +1419,18 @@ class AudioBookApp(App):
         self._tick_thread.start()
 
     def _post_to_main(self, fn):
-        """把 fn 投递到 Kivy 主线程执行（有 Handler 用 Handler，否则用 Clock）。
+        """把 fn 投递到 **Kivy 主线程** 执行。
 
-        ⚠️ 为什么必须有这个：**创建 Kivy 控件/图形指令必须在主线程**。
-        选文件的 SAF 回调不在主线程上，如果直接在里面 open_book（会创建
-        ParaView 等带 canvas 指令的控件），Kivy 会抛
+        ⚠️⚠️ 一定要区分两个「主线程」，别搞混：
+          · **Kivy 主线程** —— 唯一能创建控件 / 图形指令的线程
+            → 必须用 `Clock.schedule_once`
+          · **安卓 UI 线程（Looper）** —— `_tick` 用它，是为了保证**熄屏后仍能跑**
+            （Kivy 的 Clock 在熄屏时会停摆）；它**不是** Kivy 线程
+
+        之前 `open_book` 被投到了安卓 UI 线程，结果照样抛
             Cannot create graphics instruction outside the main Kivy thread
-        导致正文渲染做一半、布局异常（表现为顶部一片黑的空区）。
+        —— 所以凡是**操作 UI / 建控件**的，一律用 Clock。
         """
-        if self._handler is not None:
-            try:
-                self._handler.post(_TickRunnable(fn))
-                return
-            except Exception:
-                pass
         Clock.schedule_once(lambda _dt: fn(), 0)
 
     def _post_tick(self):
