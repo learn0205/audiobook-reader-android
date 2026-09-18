@@ -1713,20 +1713,18 @@ class AudioBookApp(App):
 
         # 自检信息：无 adb 时让用户截图即可定位（装的是哪版 / 推进是否在跑 / 唤醒锁是否生效）
         _eng_state = self._engine.get_state() if self._engine is not None else "-"
-        # 正文区布局数值：定位「顶部黑空区」这类问题靠它（截图即可判断）
+        # 正文区布局数值：定位「顶部黑空区」这类问题靠它（截图即可判断）。
+        # ⚠️ Kivy 的 ScrollView 不是移动子控件坐标，而是用 canvas 的 g_translate
+        # 平移 —— 所以要看 gty（实际位移），而不是 tb.y（恒为 0）。
         try:
-            _vp = getattr(self._scroll, "_viewport", None)
             _kids = self._text_box.children
-            # children 是倒序的，最后一个才是「最先添加」的那段（视觉最上面）
-            _p0 = _kids[-1] if _kids else None
-            _layout = ("vp=%.0f content=%.0f scroll_y=%.2f tb.y=%.0f "
-                       "vpy=%.0f p0y=%.0f p0h=%.0f n=%d") % (
+            _gt = getattr(self._scroll, "g_translate", None)
+            _gty = int(round(_gt.xy[1])) if _gt is not None else -99999
+            _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d sv.y=%.0f "
+                       "p0h=%.0f n=%d") % (
                 self._scroll.height, self._text_box.height,
-                self._scroll.scroll_y, self._text_box.y,
-                (_vp.y if _vp is not None else -1),
-                (_p0.y if _p0 is not None else -1),
-                (_p0.height if _p0 is not None else -1),
-                len(_kids))
+                self._scroll.scroll_y, _gty, self._scroll.y,
+                (_kids[-1].height if _kids else -1), len(_kids))
         except Exception:
             _layout = "-"
         # 上次打开的书 + 已存断点（验证「记忆功能」是否生效）
