@@ -617,7 +617,8 @@ class AudioBookApp(App):
             if path:
                 self.open_book(path)
         except Exception as err:
-            self._toast(f"读取所选文件失败：{err}")
+            # 走 _on_error：既弹 toast，也记进「自检信息 → 最近错误」（便于截图定位）
+            self._on_error(f"读取所选文件失败：{err}")
 
     def _copy_uri_to_private(self, uri):
         """把 SAF 的 content:// 复制成本地文件，返回新路径。
@@ -691,20 +692,30 @@ class AudioBookApp(App):
                           if 0 <= s < len(doc.paragraphs)]
 
         self.book_title = doc.title
-        self._engine.load(doc.paragraphs)
-        self._refresh_view()
+
+        # ⚠️ 「上次打开的书」必须**尽早落盘**：以前这句放在方法最后，只要后面
+        #    任何一步（_refresh_view / _set_highlight …）抛异常，就永远存不上，
+        #    表现为「每次打开 App 都要重新选书」。解析成功就立刻存。
+        self._config.set("last_book", doc.path)
+        self._config.save()
 
         saved = self._config.get_position(self._book_key)
         start = saved[0] if saved else 0
         start = max(0, min(start, len(self._paragraphs) - 1))
-        self._engine.seek_paragraph(start)
-        self._set_highlight(start)
 
-        # 初始化底部"当前章节"显示（进度条是按章的，得先知道在哪一章）
-        _ci, ctitle, _cs, _ce = self._chapter_at(start)
-        self.chapter_text = ctitle or ""
+        try:
+            self._engine.load(doc.paragraphs)
+            self._refresh_view()
+            self._engine.seek_paragraph(start)
+            self._set_highlight(start)
+            # 初始化底部"当前章节"显示（进度条是按章的，得先知道在哪一章）
+            _ci, ctitle, _cs, _ce = self._chapter_at(start)
+            self.chapter_text = ctitle or ""
+        except Exception as err:
+            # 以前这里的异常会被上层 try 吞成一句 toast，看不到细节。
+            # 现在上报到「设置 → 自检信息 → 最近错误」，便于定位。
+            self._on_error("打开书籍后初始化失败：%s" % err)
 
-        self._config.set("last_book", doc.path)
         if not saved:
             self._config.set_position(self._book_key, start, 0)
         self._config.save()
