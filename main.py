@@ -411,33 +411,34 @@ class AudioBookApp(App, WakelockFgMixin):
         top = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(5),
                         padding=[dp(6), dp(4)])
 
-        def _top_btn(text, color=C_BTN, width=46):
-            return Button(text=text, size_hint_x=None, width=dp(width),
-                          background_color=color, color=C_TEXT,
-                          font_size="12sp")
+        def _mk_btn(text, width=None, bg=C_BTN, fg=C_TEXT,
+                    font_size="13sp", **kw):
+            """统一构造按钮（顶部行 / 底部行共用，风格保持一致）。
 
-        btn_toc = _top_btn("目录")
+            width=None   -> 按 weight 撑满父容器（底部行用法）
+            width=dp 值  -> 固定宽度（顶部行用法）
+            """
+            btn = Button(text=text, background_color=bg, color=fg,
+                         font_size=font_size, **kw)
+            if width is not None:
+                btn.size_hint_x = None
+                btn.width = dp(width)
+            return btn
+
+        btn_toc = _mk_btn("目录", width=46)
         btn_toc.bind(on_release=lambda *_: self.show_chapters())
         self.lbl_title = Label(text=self.book_title, font_size="13sp",
                                shorten=True, shorten_from="right")
         self.bind(book_title=lambda _i, v: setattr(self.lbl_title, "text", v))
-        btn_bm = _top_btn("书签")
+        btn_bm = _mk_btn("书签", width=46)
         btn_bm.bind(on_release=lambda *_: self.show_bookmarks())
-        # 字号调节入口。设置面板里虽然也有滑块，但藏在最下面不好找，
-        # 滑块也不容易精确点到某个值 —— 这里给个一眼能看到的大按钮面板。
-        btn_font = _top_btn("Aa", color=(.26, .31, .40, 1), width=42)
-        btn_font.bind(on_release=lambda *_: self.show_font_popup())
-        btn_open = _top_btn("打开")
+        btn_open = _mk_btn("打开", width=46)
         btn_open.bind(on_release=lambda *_: self.pick_file())
-        btn_set = _top_btn("设置", color=C_PRIMARY)
-        btn_set.bind(on_release=lambda *_: self.show_settings())
 
         top.add_widget(btn_toc)
         top.add_widget(self.lbl_title)
         top.add_widget(btn_bm)
-        top.add_widget(btn_font)
         top.add_widget(btn_open)
-        top.add_widget(btn_set)
         root.add_widget(top)
 
         # ---- 正文区：只渲染「当前章节」 ----
@@ -542,24 +543,24 @@ class AudioBookApp(App, WakelockFgMixin):
         _nav = getattr(self, "_nav_dp", 0)
         ctrl = BoxLayout(size_hint_y=None, height=dp(58) + dp(_nav), spacing=dp(8),
                          padding=[dp(12), dp(5), dp(12), dp(5) + dp(_nav)])
-        self.btn_prev_ch = Button(text="◀◀ 上一章",
-                                  background_color=C_BTN, color=C_TEXT,
-                                  font_size="13sp")
+        self.btn_prev_ch = _mk_btn("◀◀ 上一章")
         self.btn_prev_ch.bind(on_release=lambda *_: self.jump_chapter(-1))
 
-        self.btn_play = Button(text="▶ 播放",
-                               background_color=C_PRIMARY, color=(1, 1, 1, 1),
-                               font_size="15sp", bold=True)
+        self.btn_play = _mk_btn("▶ 播放", bg=C_PRIMARY, fg=(1, 1, 1, 1),
+                                font_size="15sp", bold=True)
         self.btn_play.bind(on_release=lambda *_: self.toggle_play())
 
-        self.btn_next_ch = Button(text="下一章 ▶▶",
-                                  background_color=C_BTN, color=C_TEXT,
-                                  font_size="13sp")
+        self.btn_next_ch = _mk_btn("下一章 ▶▶")
         self.btn_next_ch.bind(on_release=lambda *_: self.jump_chapter(+1))
+
+        # 「设置」放在「下一章 ▶▶」右侧，与底部其余按钮同一套构造 / 风格
+        self.btn_set = _mk_btn("设置")
+        self.btn_set.bind(on_release=lambda *_: self.show_settings())
 
         ctrl.add_widget(self.btn_prev_ch)
         ctrl.add_widget(self.btn_play)
         ctrl.add_widget(self.btn_next_ch)
+        ctrl.add_widget(self.btn_set)
         root.add_widget(ctrl)
         return root
 
@@ -1502,51 +1503,6 @@ class AudioBookApp(App, WakelockFgMixin):
         self._save_position(persist=True)   # 目录选章立刻落盘，杀掉也不丢
         self._toast("从「%s」开始朗读" % title[:18])
 
-    def show_font_popup(self):
-        """字体大小调节面板：A- / A+ 大按钮 + 实时预览。
-
-        设置面板里也有字号滑块，但藏在最下面不好找，滑块也不容易
-        精确点到某个值。这里给一组直观的大按钮，改完立刻能在预览里看到。
-        """
-        popup = Popup(title="字体大小", size_hint=(0.88, None), height=dp(310))
-        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
-
-        value_lbl = Label(text="%d 号" % int(self.reader_font),
-                          font_size="24sp", color=C_TEXT, bold=True,
-                          size_hint_y=None, height=dp(38))
-
-        preview = Label(text="字体预览：星痕之门，入者皆成神。",
-                        font_size="%dsp" % int(self.reader_font),
-                        color=C_DIM, halign="center", valign="middle",
-                        size_hint_y=None, height=dp(64))
-        preview.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
-
-        def apply_delta(delta):
-            size = max(10, min(30, int(self.reader_font) + delta))
-            self._on_font(size)
-            value_lbl.text = "%d 号" % size
-            preview.font_size = "%dsp" % size
-
-        row = BoxLayout(size_hint_y=None, height=dp(64), spacing=dp(12))
-        btn_minus = Button(text="A-", background_color=C_BTN, color=C_TEXT,
-                           font_size="22sp", bold=True)
-        btn_minus.bind(on_release=lambda *_: apply_delta(-1))
-        btn_plus = Button(text="A+", background_color=C_PRIMARY,
-                          color=(1, 1, 1, 1), font_size="22sp", bold=True)
-        btn_plus.bind(on_release=lambda *_: apply_delta(+1))
-        row.add_widget(btn_minus)
-        row.add_widget(btn_plus)
-
-        btn_done = Button(text="完成", size_hint_y=None, height=dp(46),
-                          background_color=C_PRIMARY, color=(1, 1, 1, 1))
-        btn_done.bind(on_release=lambda *_: popup.dismiss())
-
-        box.add_widget(value_lbl)
-        box.add_widget(preview)
-        box.add_widget(row)
-        box.add_widget(btn_done)
-        popup.content = box
-        popup.open()
 
     def show_settings(self):
         """设置面板：音色 / 音调 / 语速 / 语调起伏 / 字号 / 定时休眠。"""
