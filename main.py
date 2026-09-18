@@ -457,6 +457,14 @@ class AudioBookApp(App, WakelockFgMixin):
         # 用普通控件即可，而且高度由 Kivy 自动算准
         # （RecycleView 对「高度不定的文本条目」反而算不准）。
         body = FloatLayout(size_hint_y=1)
+        # 双重保险：body 自己画上 C_BG。即便 Window.clearcolor 没生效或被覆盖，
+        # 正文区里的空白也显示为深灰（页面背景），不会再露 Window 默认纯黑。
+        from kivy.graphics import Color, Rectangle
+        with body.canvas.before:
+            Color(*C_BG)
+            rect = Rectangle(pos=body.pos, size=body.size)
+        body.bind(pos=lambda w, v: setattr(rect, "pos", v),
+                  size=lambda w, v: setattr(rect, "size", v))
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
         self._scroll = self._make_scroll()
         # 顶部留白 = 两倍 15 号字（2 × sp(15) = sp(30)）：
@@ -812,6 +820,14 @@ class AudioBookApp(App, WakelockFgMixin):
         # 若新章内容比视口短，Kivy 会把内容贴到底部，上方留出一大片黑
         # （用户看到的「黑色遮蔽层挡住文字」）。后面 _set_highlight 再按需居中。
         self._scroll_to_top()
+        # ★ 双保险（强制）：直接设 g_translate.y，绕开 Kivy 内部 effect_y 状态
+        # 与 scroll_y 不同步的问题，强制正文内容顶部 = ScrollView 顶部
+        try:
+            gt = self._scroll.g_translate
+            gt.y = (self._scroll.y
+                     - (self._text_box.height - self._scroll.height))
+        except Exception:
+            pass
         self._set_highlight(global_index)
         self._update_hint()
         diag(f"[load] scroll_h={self._scroll.height} content_h="
@@ -1538,11 +1554,16 @@ class AudioBookApp(App, WakelockFgMixin):
             # gap = 视口顶部 - 内容顶部；>0 说明上方有一段没内容（即黑区）
             _gap = int(round((self._scroll.y + self._scroll.height)
                              - (_gty + self._text_box.height)))
+            try:
+                from kivy.core.window import Window as _W
+                _wh = int(_W.height)
+            except Exception:
+                _wh = -1
             _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d sv.y=%.0f body=%.0f "
-                       "gap=%d p0h=%.0f n=%d") % (
+                       "winH=%d gap=%d p0h=%.0f n=%d") % (
                 self._scroll.height, self._text_box.height,
                 self._scroll.scroll_y, _gty, self._scroll.y,
-                getattr(self._body, "height", -1), _gap,
+                getattr(self._body, "height", -1), _wh, _gap,
                 (_kids[-1].height if _kids else -1), len(_kids))
         except Exception:
             _layout = "-"
