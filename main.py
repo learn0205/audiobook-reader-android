@@ -1689,9 +1689,18 @@ class AudioBookApp(App):
         _eng_state = self._engine.get_state() if self._engine is not None else "-"
         # 正文区布局数值：定位「顶部黑空区」这类问题靠它（截图即可判断）
         try:
-            _layout = "vp=%.0f content=%.0f scroll_y=%.2f tb.y=%.0f" % (
+            _vp = getattr(self._scroll, "_viewport", None)
+            _kids = self._text_box.children
+            # children 是倒序的，最后一个才是「最先添加」的那段（视觉最上面）
+            _p0 = _kids[-1] if _kids else None
+            _layout = ("vp=%.0f content=%.0f scroll_y=%.2f tb.y=%.0f "
+                       "vpy=%.0f p0y=%.0f p0h=%.0f n=%d") % (
                 self._scroll.height, self._text_box.height,
-                self._scroll.scroll_y, self._text_box.y)
+                self._scroll.scroll_y, self._text_box.y,
+                (_vp.y if _vp is not None else -1),
+                (_p0.y if _p0 is not None else -1),
+                (_p0.height if _p0 is not None else -1),
+                len(_kids))
         except Exception:
             _layout = "-"
         _diag_text = (

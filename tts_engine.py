@@ -339,8 +339,14 @@ class EdgeTTS:
         self._sent_started = time.time()
         gen = self._generation
 
-        # 合成在子线程做（网络 IO），完成后再回主线程播放
-        args = (self._synth_text_for(sentence), gen)
+        # 合成在子线程做（网络 IO），完成后再回主线程播放。
+        # ⚠️ 这里必须传**原始句子字符串**：_synthesize_and_play 内部会调
+        # _synth_text_for(sentence) 做换算。之前误传了 self._synth_text_for(sentence)
+        # 的**返回值（元组）**，于是子线程里又换算一次 → text 变成嵌套元组
+        # → edge_tts_client 里 su.escape(tuple) 抛
+        #   "'tuple' object has no attribute 'replace'"
+        # → 表现为「选中 Edge 音色提示合成失败」，而且**所有 Edge 音色都失败**。
+        args = (sentence, gen)
         self._synth_thread = threading.Thread(
             target=self._synthesize_and_play, args=args, daemon=True)
         self._synth_thread.start()
