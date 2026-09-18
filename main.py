@@ -30,7 +30,7 @@ import traceback
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.lang import Builder
-from kivy.metrics import dp
+from kivy.metrics import dp, sp
 from kivy.properties import (BooleanProperty, ListProperty, NumericProperty,
                              StringProperty)
 from kivy.uix.boxlayout import BoxLayout
@@ -334,6 +334,13 @@ class AudioBookApp(App, WakelockFgMixin):
     # ============================================================
     def build(self):
         self.title = "有声书朗读 " + BUILD_TAG
+        # ⚠️ 页面背景：C_BG 之前**只定义了却从未使用**，界面露出的是 Window 默认的
+        # **纯黑**，看起来就像「顶部压了一层黑色覆盖层」。这里真正把它用上。
+        try:
+            from kivy.core.window import Window
+            Window.clearcolor = C_BG
+        except Exception:
+            pass
         # 启动阶段的任何异常都渲染到屏幕上。
         # 安卓上普通用户拿不到 logcat，这是唯一能让用户把真实报错反馈回来的办法。
         try:
@@ -452,8 +459,10 @@ class AudioBookApp(App, WakelockFgMixin):
         body = FloatLayout(size_hint_y=1)
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
         self._scroll = self._make_scroll()
+        # 顶部留白 = 两倍 15 号字（2 × sp(15) = sp(30)）：
+        # 强制正文内容从「界面顶端往下 30 字号」处开始展示，其余布局随之对齐。
         self._text_box = BoxLayout(orientation="vertical", size_hint_y=None,
-                                   spacing=dp(1), padding=[0, dp(6), 0, dp(12)])
+                                   spacing=dp(1), padding=[0, sp(30), 0, dp(12)])
 
         # 内容高度 = max(内容实际高度, 视口高度)。
         # 只绑 minimum_height 的话：当某章内容比视口短时，Kivy 会把内容**贴到视口
@@ -892,6 +901,8 @@ class AudioBookApp(App, WakelockFgMixin):
         self._setting_scroll = True
         try:
             self._scroll.scroll_y = 1.0
+            # 强制立刻重算 g_translate，保证内容顶部严格贴住视口顶部（消除黑区）
+            self._scroll.update_from_scroll()
         except Exception:
             pass
         finally:
@@ -1524,11 +1535,14 @@ class AudioBookApp(App, WakelockFgMixin):
             _kids = self._text_box.children
             _gt = getattr(self._scroll, "g_translate", None)
             _gty = int(round(_gt.xy[1])) if _gt is not None else -99999
+            # gap = 视口顶部 - 内容顶部；>0 说明上方有一段没内容（即黑区）
+            _gap = int(round((self._scroll.y + self._scroll.height)
+                             - (_gty + self._text_box.height)))
             _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d sv.y=%.0f body=%.0f "
-                       "p0h=%.0f n=%d") % (
+                       "gap=%d p0h=%.0f n=%d") % (
                 self._scroll.height, self._text_box.height,
                 self._scroll.scroll_y, _gty, self._scroll.y,
-                getattr(self._body, "height", -1),
+                getattr(self._body, "height", -1), _gap,
                 (_kids[-1].height if _kids else -1), len(_kids))
         except Exception:
             _layout = "-"
