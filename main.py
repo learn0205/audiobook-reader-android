@@ -508,6 +508,13 @@ class AudioBookApp(App, WakelockFgMixin):
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
         self._top_w = top
         self._scroll = self._make_scroll()
+        # ⚠️⚠️ 必须给 pos_hint！body 是 FloatLayout：**没有 pos_hint 的子控件
+        # 根本不会被布局**（floatlayout.py 的 do_layout 只遍历 pos_hint 键），
+        # scroll.pos 会永远停在默认 (0,0) —— 而普通控件的 pos 是窗口绝对坐标，
+        # 于是正文区一直画在窗口底部：上方空出 顶栏+进度+控制条 的总高黑区、
+        # 正文穿透底部两行（这正是折腾多轮的「顶部黑空区+内容下坠」真凶）。
+        # 给了 pos_hint，do_layout 才会把 scroll 摆到 body 的位置上。
+        self._scroll.pos_hint = {"x": 0, "y": 0}
         # 顶部留白 = 两倍 15 号字（2 × sp(15) = sp(30)）：
         # 强制正文内容从「界面顶端往下 30 字号」处开始展示，其余布局随之对齐。
         self._text_box = BoxLayout(orientation="vertical", size_hint_y=None,
@@ -546,7 +553,8 @@ class AudioBookApp(App, WakelockFgMixin):
                  "· 顶部「目录」    →  按章节跳转朗读\n\n"
                  "（第一次打开书籍时会自动弹出提示）",
             halign="center", valign="middle", font_size="14sp",
-            color=C_DIM)
+            color=C_DIM,
+            pos_hint={"center_x": 0.5, "center_y": 0.5})  # 同 scroll：无 pos_hint 不会被 FloatLayout 摆位
         self.lbl_hint.bind(
             size=lambda w, *_: setattr(w, "text_size", (w.width - dp(40), None)))
         body.add_widget(self.lbl_hint)
@@ -1600,17 +1608,18 @@ class AudioBookApp(App, WakelockFgMixin):
             try:
                 from kivy.core.window import Window as _W
                 _wh = int(_W.height)
-                # 正文区、顶栏底部在 window 中的实际像素 y
-                _b_top_y = int(self._body.to_window(0, self._body.height)[1])
-                _b_y = int(self._body.to_window(0, 0)[1])
+                # ⚠️ 普通告警：to_parent/to_window 对普通控件是**空操作**（只有
+                # RelativeLayout 才引入新坐标系），返回的是本地坐标回声，毫无
+                # 绝对位置信息 —— 必须直接读 .y（普通控件 pos 即窗口绝对坐标）。
+                _b_y = int(self._body.y)
+                _b_top_y = int(self._body.y + self._body.height)
                 _root = self._body.parent
                 # root 子控件顺序（类型首字母，后添加的在前）：
                 # 正确应为 "BBFB" —— F(loatLayout)=正文区，排在两个 B 之间
                 _kids = "".join(type(c).__name__[0] for c in _root.children)
-                _top_w = max(_root.children, key=lambda c: c.to_window(0, c.height)[1])
-                _t_bot_y = int(_top_w.to_window(0, 0)[1])
+                _t_bot_y = int(self._top_w.y)
                 _root_h = int(_root.height)
-                _root_y = int(_root.to_window(0, _root.height)[1])
+                _root_y = int(_root.y)
             except Exception:
                 _wh = _b_top_y = _t_bot_y = _root_h = _root_y = -1
                 _b_y = -1
@@ -1618,12 +1627,12 @@ class AudioBookApp(App, WakelockFgMixin):
             _gap_px = -1 if _b_top_y < 0 or _t_bot_y < 0 else (_b_top_y - _t_bot_y)
             _layout = ("vp=%.0f content=%.0f sy=%.2f gty=%d body=%.0f winH=%d "
                        "rootH=%d rootY=%d tBot=%d bTop=%d gap2=%d "
-                       "bY=%d fix=%d kids=%s") % (
+                       "bY=%d svY=%.0f fix=%d kids=%s") % (
                 self._scroll.height, self._text_box.height,
                 self._scroll.scroll_y, _gty,
                 getattr(self._body, "height", -1), _wh, _root_h, _root_y,
                 _t_bot_y, _b_top_y, _gap_px,
-                _b_y, self._layout_fixes, _kids)
+                _b_y, self._scroll.y, self._layout_fixes, _kids)
         except Exception:
             _layout = "-"
         # 上次打开的书 + 已存断点（验证「记忆功能」是否生效）
