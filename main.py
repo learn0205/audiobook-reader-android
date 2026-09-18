@@ -332,6 +332,7 @@ class AudioBookApp(App):
         self._tick_mode = "未启动"   # Handler / Clock / 未启动
         self._wake_error = ""       # wakelock 申请失败原因
         self._last_error = ""       # 最近一次错误（显示在自检信息里，便于截图定位）
+        self._last_persist = 0.0    # 断点上次落盘的时刻（限流用，避免每 0.2s 写盘）
         # ---- 前台服务（熄屏/后台朗读保活）----
         self._fg_started = False
         self._fg_error = ""
@@ -738,10 +739,24 @@ class AudioBookApp(App):
         popup.open()
 
     def _restore_last_book(self, *_):
+        """启动时自动恢复上次的书（并靠 config 里的断点续读）。
+
+        断点恢复在 open_book 里（读 config 的 positions）完成，
+        所以「上次的书 + 上次读到哪一章」都会自动回来。
+        """
         last = str(self._config.get("last_book", ""))
+        if last and not os.path.isfile(last):
+            # 路径失效时退回 books/ 目录里的同名文件
+            # （万一 user_data_dir 变了，也不至于让用户重新选书）
+            alt = os.path.join(self.user_data_dir, "books",
+                               os.path.basename(last))
+            if os.path.isfile(alt):
+                last = alt
         if last and os.path.isfile(last):
             self._follow = True
             self.open_book(last)
+        elif last:
+            self._toast("上次的书已找不到，请重新选择")
         else:
             self._toast("点右上角「打开」选择 txt / epub")
 
@@ -1087,7 +1102,7 @@ class AudioBookApp(App):
         self._follow = True          # 跳章并开始朗读 → 恢复「高亮跟随」
         self._engine.play(start)
         self._set_highlight(start)
-        self._save_position()
+        self._save_position(persist=True)   # 跳章立刻落盘，杀掉也不丢
         self._toast("已跳到「%s」" % title[:18])
 
     def _slider_down(self, _slider, touch):
@@ -1239,11 +1254,22 @@ class AudioBookApp(App):
         if current:
             self._engine.set_voice(current)
 
-    def _save_position(self):
-        if not self._book_key:
+    def _save_position(self, persist=False):
+        """记录当前断点。
+
+        ⚠️ 以前只写内存、不落盘（只有 on_pause/on_stop 才 save）。于是 App 被系统
+        **杀掉**（从最近任务划掉、后台被回收）时断点就丢了 —— 用户每次重开都得
+        重新选章节。现在默认会按 5 秒限流落盘；关键操作（跳章/目录选择）用
+        persist=True 立刻落盘。
+        """
+        if not self._book_key or self._engine is None:
             return
         para, char, _ = self._engine.get_position()
         self._config.set_position(self._book_key, para, char)
+        now = time.time()
+        if persist or (now - self._last_persist) > 5.0:
+            self._config.save()
+            self._last_persist = now
 
     def _tick(self, *_):
         """定时任务（每 0.2 秒）：推进兜底 + 保存断点 + 刷新休眠倒计时。
@@ -1625,7 +1651,7 @@ class AudioBookApp(App):
         self._follow = True          # 目录跳章并开始朗读 → 恢复「高亮跟随」
         self._engine.play(start)
         self._set_highlight(start)
-        self._save_position()
+        self._save_position(persist=True)   # 目录选章立刻落盘，杀掉也不丢
         self._toast("从「%s」开始朗读" % title[:18])
 
     def show_font_popup(self):
@@ -1703,6 +1729,15 @@ class AudioBookApp(App):
                 len(_kids))
         except Exception:
             _layout = "-"
+        # 上次打开的书 + 已存断点（验证「记忆功能」是否生效）
+        try:
+            _lb = str(self._config.get("last_book", ""))
+            _book = os.path.basename(_lb) if _lb else "无"
+            _pos = (self._config.get_position(self._book_key)
+                    if self._book_key else None)
+            _pos_s = ("第%d段" % _pos[0]) if _pos else "无"
+        except Exception:
+            _book, _pos_s = "-", "-"
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
@@ -1710,6 +1745,7 @@ class AudioBookApp(App):
             "前台服务 %s%s\n"
             "引擎 %s\n"
             "正文 %s\n"
+            "记忆 书=%s  断点=%s\n"
             "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                "已持有" if self._wake_lock is not None else "未持有",
@@ -1717,6 +1753,7 @@ class AudioBookApp(App):
                "已启动" if self._fg_started else "未启动",
                ("  " + self._fg_error) if self._fg_error else "",
                _eng_state, _layout,
+               _book, _pos_s,
                (str(self._last_error)[:120] or "无"))
         )
         _diag = Label(text=_diag_text, size_hint_y=None, height=dp(92),
