@@ -181,6 +181,8 @@ class AndroidTTS:
         self._voices = []           # [{"name":..., "label":..., "locale":...}]
         self._init_listener = None
         self._utter_listener = None
+        self._utter_cb = None
+        self.utter_listener_ok = False   # 自检显示用：进度监听器是否成功挂上
 
         if not _JNIUS_OK:
             self._init_error = f"pyjnius 不可用（{_JNIUS_ERR}）"
@@ -203,19 +205,25 @@ class AndroidTTS:
             self.on_error(self._init_error)
             return
 
-        # ⚠️ UtteranceProgressListener 是**抽象类、不是接口**，pyjnius 的
-        # __javainterfaces__ 实现不了它，构造时会抛
-        #   IllegalArgumentException: android.speech.tts.UtteranceProgressListener
-        #   is not an interface
-        # 之前这一句和引擎初始化写在同一个 try 里，于是「监听器装不上」直接导致
-        # **整个引擎初始化失败**（_ready 永远为 False、系统音色一个都枚举不到）。
-        # 监听器其实是**可选**的：朗读推进本来就靠 poll_advance() 轮询 isSpeaking()，
-        # 不依赖 onDone 回调。所以这里单独兜住，装不上也绝不能拖垮引擎。
+        # ⚠️ pyjnius 的 PythonJavaClass 底层是 java.lang.reflect.Proxy，
+        # **只能实现接口**。UtteranceProgressListener 是抽象类，Proxy 传抽象类
+        # 直接抛 IllegalArgumentException: ... is not an interface。
+        # 解法（buildozer.spec 的 android.add_src = java）：
+        #   · APK 里编译真正的 Java 桥接 TTSProgressListener
+        #     （UtteranceProgressListener 的真子类，见 java/org/audiobookreader/android/），
+        #     并在 Java 侧把 binder 线程回调统一 post 到主线程；
+        #   · Python 侧用 PythonJavaClass 实现它的 TTSProgressCallback 接口。
+        # 监听器是**可选**的：朗读推进本来就靠 poll_advance() 轮询 isSpeaking()，
+        # 装不上也绝不能拖垮引擎（早期版本曾因此整个引擎初始化失败）。
         try:
-            self._utter_listener = _UtteranceListener(self)
+            _Bridge = autoclass("org.audiobookreader.android.TTSProgressListener")
+            self._utter_cb = _TTSUtteranceCallback(self)
+            self._utter_listener = _Bridge(self._utter_cb)
         except Exception as err:
             self._utter_listener = None
-            self.on_error("进度监听器不可用（不影响朗读）：%s" % err)
+            self._utter_cb = None
+            self.utter_listener_ok = False
+            self.on_error("进度监听器不可用（不影响朗读）：%s" % str(err)[:80])
 
     def _on_init_done(self, status):
         """TextToSpeech 初始化回调（status=0 表示成功）。"""
@@ -227,6 +235,7 @@ class AndroidTTS:
         try:
             if self._utter_listener is not None:
                 self._tts.setOnUtteranceProgressListener(self._utter_listener)
+                self.utter_listener_ok = True
         except Exception as err:
             self.on_error("进度监听器设置失败（不影响朗读）：%s" % err)
         try:
@@ -683,9 +692,16 @@ if _JNIUS_OK:
         def onInit(self, status):
             self.owner._on_init_done(status)
 
-    class _UtteranceListener(PythonJavaClass):
-        """UtteranceProgressListener：逐句朗读的推进靠这里的 onDone。"""
-        __javainterfaces__ = ["android/speech/tts/UtteranceProgressListener"]
+    class _TTSUtteranceCallback(PythonJavaClass):
+        """实现 APK 内编译好的 TTSProgressCallback 接口（pyjnius 只能实现接口）。
+
+        真正挂到 TextToSpeech 上的是同包的 TTSProgressListener
+        （UtteranceProgressListener 抽象类的真子类），它在 Java 侧把
+        binder 线程回调 post 到主线程后转发给本类 —— 线程模型与
+        poll_advance / speak 调用一致。
+        """
+        __javainterfaces__ = [
+            "org/audiobookreader/android/TTSProgressCallback"]
         __javacontext__ = "app"
 
         def __init__(self, owner):
@@ -711,5 +727,5 @@ else:                       # 桌面环境下提供同名占位，保证可导�
     class _InitListener:    # pragma: no cover
         pass
 
-    class _UtteranceListener:   # pragma: no cover
+    class _TTSUtteranceCallback:   # pragma: no cover
         pass

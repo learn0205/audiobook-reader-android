@@ -597,6 +597,10 @@ class ReaderTTS:
     def get_state(self):
         return self._backend().get_state()
 
+    def utter_listener_ok(self):
+        """进度监听器是否成功挂上（AndroidTTS 专有；自检显示用）。"""
+        return bool(getattr(self._android, "utter_listener_ok", False))
+
     def get_cps(self):
         return self._backend().get_cps()
 

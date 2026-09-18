@@ -1599,6 +1599,11 @@ class AudioBookApp(App, WakelockFgMixin):
 
         # 自检信息：无 adb 时让用户截图即可定位（装的是哪版 / 推进是否在跑 / 唤醒锁是否生效）
         _eng_state = self._engine.get_state() if self._engine is not None else "-"
+        try:
+            _utter_ok = ("已挂" if self._engine.utter_listener_ok()
+                         else "未挂（用轮询推进）")
+        except Exception:
+            _utter_ok = "-"
         # 正文区布局数值：定位「顶部黑空区」这类问题靠它（截图即可判断）。
         # ⚠️ Kivy 的 ScrollView 不是移动子控件坐标，而是用 canvas 的 g_translate
         # 平移 —— 所以要看 gty（实际位移），而不是 tb.y（恒为 0）。
@@ -1654,6 +1659,7 @@ class AudioBookApp(App, WakelockFgMixin):
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
+            "监听器 %s\n"
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
             "引擎 %s\n"
@@ -1662,6 +1668,7 @@ class AudioBookApp(App, WakelockFgMixin):
             "崩溃 %s\n"
             "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
+               _utter_ok,
                "已持有" if self._wake_lock is not None else "未持有",
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",

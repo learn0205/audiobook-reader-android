@@ -53,6 +53,12 @@ android.archs = arm64-v8a
 android.api = 33
 android.minapi = 24
 
+# 自定义 Java 源码目录：TTSProgressListener/Callback 随 APK 编译进 classes.dex。
+# pyjnius 的 PythonJavaClass 只能实现接口（底层是 java.lang.reflect.Proxy），
+# 而 setOnUtteranceProgressListener 需要 UtteranceProgressListener 抽象类的
+# 真子类 —— 所以朗读进度监听必须走这个 Java 桥接（见 tts_android.py）。
+android.add_src = java
+
 # ⚠️ 这里**故意不写 android.ndk**，让 buildozer 自动采用 p4a 推荐的版本。
 #   p4a develop 的 pythonforandroid/recommendations.py 里写着
 #       RECOMMENDED_NDK_VERSION = "28c"
