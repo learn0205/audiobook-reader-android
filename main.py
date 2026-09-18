@@ -458,7 +458,20 @@ class AudioBookApp(App):
         self._scroll = self._make_scroll()
         self._text_box = BoxLayout(orientation="vertical", size_hint_y=None,
                                    spacing=dp(1), padding=[0, dp(6), 0, dp(12)])
-        self._text_box.bind(minimum_height=self._text_box.setter("height"))
+
+        # 内容高度 = max(内容实际高度, 视口高度)。
+        # 只绑 minimum_height 的话：当某章内容比视口短时，Kivy 会把内容**贴到视口
+        # 底部**，上方留出一大片黑（用户看到的「黑色遮蔽层挡住文字」）。
+        # 撑满视口后，正文永远从顶部开始显示。
+        def _sync_content_height(*_):
+            try:
+                self._text_box.height = max(self._text_box.minimum_height,
+                                            self._scroll.height)
+            except Exception:
+                pass
+
+        self._text_box.bind(minimum_height=_sync_content_height)
+        self._scroll.bind(height=_sync_content_height)
         self._scroll.add_widget(self._text_box)
         body.add_widget(self._scroll)
         self._scroll.bind(scroll_y=self._on_scroll_y)
@@ -1674,19 +1687,27 @@ class AudioBookApp(App):
 
         # 自检信息：无 adb 时让用户截图即可定位（装的是哪版 / 推进是否在跑 / 唤醒锁是否生效）
         _eng_state = self._engine.get_state() if self._engine is not None else "-"
+        # 正文区布局数值：定位「顶部黑空区」这类问题靠它（截图即可判断）
+        try:
+            _layout = "vp=%.0f content=%.0f scroll_y=%.2f tb.y=%.0f" % (
+                self._scroll.height, self._text_box.height,
+                self._scroll.scroll_y, self._text_box.y)
+        except Exception:
+            _layout = "-"
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
             "引擎 %s\n"
+            "正文 %s\n"
             "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                "已持有" if self._wake_lock is not None else "未持有",
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",
                ("  " + self._fg_error) if self._fg_error else "",
-               _eng_state,
+               _eng_state, _layout,
                (str(self._last_error)[:120] or "无"))
         )
         _diag = Label(text=_diag_text, size_hint_y=None, height=dp(92),
