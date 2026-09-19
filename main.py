@@ -132,8 +132,30 @@ KV = """
 <Button>:
     background_normal: ''
     background_down: ''
-    color: 0.90, 0.92, 0.95, 1
     font_size: '14sp'
+
+# 主题感知控件：颜色绑定 app.theme_*（AudioBookApp 的 ListProperty），
+# 切换主题属性时全部已创建的控件即时刷新。
+<ABButton>:
+    background_color: app.theme_btn
+    color: app.theme_text
+
+<ABPrimaryButton>:
+    background_color: app.theme_primary
+    color: 1, 1, 1, 1
+
+<ABDangerButton>:
+    background_color: app.theme_danger
+    color: 1, 1, 1, 1
+
+<ABDimLabel>:
+    color: app.theme_dim
+
+<Label>:
+    color: app.theme_text
+
+<Popup>:
+    title_color: app.theme_text
     canvas.before:
         Color:
             rgba: self.background_color
@@ -154,8 +176,8 @@ KV = """
     text_size: self.width - dp(20), None
     padding_x: dp(10)
     font_size: '13sp'
-    color: 0.90, 0.92, 0.95, 1
-    background_color: 0.18, 0.21, 0.26, 1
+    color: app.theme_text
+    background_color: app.theme_btn
 
 <ParaView>:
     # 一段正文：点一下就从这段开始读；朗读中的那一段有底色。
@@ -188,6 +210,37 @@ C_PRIMARY = (0.23, 0.51, 0.96, 1)   # 主按钮（播放）
 C_DANGER = (0.50, 0.22, 0.24, 1)    # 危险按钮（清空书签）
 C_TEXT = (0.90, 0.92, 0.95, 1)      # 主文字
 C_DIM = (0.55, 0.60, 0.68, 1)       # 次要文字
+
+# ---- 主题（设置里可切「深色 / 浅色」）----
+# 颜色不再直接写死给控件，而是绑定到 App 的 theme_* 属性（见 AudioBookApp），
+# KV 规则里用 app.theme_xxx 引用 —— 切换主题时全部控件即时刷新，无需重建界面。
+_THEMES = {
+    "dark": {"bg": C_BG, "btn": C_BTN, "primary": C_PRIMARY, "danger": C_DANGER,
+             "text": C_TEXT, "dim": C_DIM},
+    "light": {"bg": (0.96, 0.96, 0.97, 1), "btn": (0.89, 0.91, 0.94, 1),
+              "primary": (0.16, 0.42, 0.90, 1), "danger": (0.80, 0.28, 0.30, 1),
+              "text": (0.10, 0.12, 0.16, 1), "dim": (0.42, 0.46, 0.52, 1)},
+}
+
+
+class ABButton(Button):
+    """主题感知普通按钮：颜色由 KV 规则绑定 app.theme_*，切主题即时刷新。"""
+    pass
+
+
+class ABPrimaryButton(ABButton):
+    """主按钮（播放 / 关闭）：主色底 + 白字。"""
+    pass
+
+
+class ABDangerButton(ABButton):
+    """危险按钮（清空书签等）。"""
+    pass
+
+
+class ABDimLabel(Label):
+    """次要文字标签（提示、说明、自检信息）。"""
+    pass
 
 # 用户自己翻过之后，暂停「朗读自动跟随」的秒数。
 # 没有这个缓冲，朗读每换一段就把视图拽回高亮处，
@@ -287,6 +340,13 @@ class AudioBookApp(App, WakelockFgMixin):
     play_label = StringProperty("▶ 播放")
     reader_font = NumericProperty(15)
     line_height = NumericProperty(1.0)   # 正文行距系数（1.0=系统默认，最大 2.0）
+    theme = StringProperty("dark")       # 深色 / 浅色主题（设置里切换）
+    theme_bg = ListProperty(C_BG)
+    theme_btn = ListProperty(C_BTN)
+    theme_primary = ListProperty(C_PRIMARY)
+    theme_danger = ListProperty(C_DANGER)
+    theme_text = ListProperty(C_TEXT)
+    theme_dim = ListProperty(C_DIM)
     highlight_index = NumericProperty(-1)
 
     def __init__(self, **kwargs):
@@ -349,7 +409,8 @@ class AudioBookApp(App, WakelockFgMixin):
         # **纯黑**，看起来就像「顶部压了一层黑色覆盖层」。这里真正把它用上。
         try:
             from kivy.core.window import Window
-            Window.clearcolor = C_BG
+            Window.clearcolor = C_BG   # 初值；之后随 theme_bg 属性联动
+            self.bind(theme_bg=lambda _o, v: setattr(Window, "clearcolor", v))
         except Exception:
             pass
         # 启动阶段的任何异常都渲染到屏幕上。
@@ -393,6 +454,8 @@ class AudioBookApp(App, WakelockFgMixin):
         self._config = ConfigManager(cfg_path)
         self.reader_font = float(self._config.get("font_size", 15))
         self.line_height = max(1.0, min(2.0, float(self._config.get("line_height", 1.0))))
+        self.theme = "light" if self._config.get("theme", "dark") == "light" else "dark"
+        self._apply_theme_colors()
 
         self._engine = ReaderTTS(
             on_progress=self._on_progress,
@@ -475,9 +538,11 @@ class AudioBookApp(App, WakelockFgMixin):
 
             width=None   -> 按 weight 撑满父容器（底部行用法）
             width=dp 值  -> 固定宽度（顶部行用法）
+            颜色由 KV 规则绑定主题属性（bg 仅用于选控件类别）。
             """
-            btn = Button(text=text, background_color=bg, color=fg,
-                         font_size=font_size, **kw)
+            cls = (ABPrimaryButton if bg is C_PRIMARY
+                   else ABDangerButton if bg is C_DANGER else ABButton)
+            btn = cls(text=text, font_size=font_size, **kw)
             if width is not None:
                 btn.size_hint_x = None
                 btn.width = dp(width)
@@ -512,8 +577,9 @@ class AudioBookApp(App, WakelockFgMixin):
         # 正文区里的空白也显示为深灰（页面背景），不会再露 Window 默认纯黑。
         from kivy.graphics import Color, Rectangle
         with body.canvas.before:
-            Color(*C_BG)
+            self._body_bg_color = Color(*C_BG)
             rect = Rectangle(pos=body.pos, size=body.size)
+        self.bind(theme_bg=lambda _o, v: setattr(self._body_bg_color, "rgba", v))
         body.bind(pos=lambda w, v: setattr(rect, "pos", v),
                   size=lambda w, v: setattr(rect, "size", v))
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
@@ -555,7 +621,7 @@ class AudioBookApp(App, WakelockFgMixin):
             on_touch_down=lambda inst, t: diag(
                 f"[SV] down {t.pos} collide={self._scroll.collide_point(*t.pos)}"))
 
-        self.lbl_hint = Label(
+        self.lbl_hint = ABDimLabel(
             text="尚未打开书籍\n\n"
                  "点右上角「打开」选择 txt / epub\n\n"
                  "打开之后：\n"
@@ -564,7 +630,6 @@ class AudioBookApp(App, WakelockFgMixin):
                  "· 顶部「目录」    →  按章节跳转朗读\n\n"
                  "（第一次打开书籍时会自动弹出提示）",
             halign="center", valign="middle", font_size="14sp",
-            color=C_DIM,
             pos_hint={"center_x": 0.5, "center_y": 0.5})  # 同 scroll：无 pos_hint 不会被 FloatLayout 摆位
         self.lbl_hint.bind(
             size=lambda w, *_: setattr(w, "text_size", (w.width - dp(40), None)))
@@ -966,7 +1031,7 @@ class AudioBookApp(App, WakelockFgMixin):
         """操作说明弹窗（首次打开书籍时自动出现，之后可从设置里再调出）。"""
         popup = Popup(title="怎么用", size_hint=(0.88, None), height=dp(320))
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(14))
-        tips = Label(
+        tips = ABDimLabel(
             text="· 点正文任意一段  →  从该处开始朗读\n\n"
                  "· 长按任意一段    →  加书签 / 选段朗读\n\n"
                  "· 顶部「目录」    →  按章节跳转朗读\n\n"
@@ -975,9 +1040,7 @@ class AudioBookApp(App, WakelockFgMixin):
             halign="left", valign="top", font_size="13sp")
         tips.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
         box.add_widget(tips)
-        btn = Button(text="知道了", size_hint_y=None, height=dp(46),
-                     background_normal="", background_color=C_PRIMARY,
-                     color=(1, 1, 1, 1))
+        btn = ABPrimaryButton(text="知道了", size_hint_y=None, height=dp(46))
         btn.bind(on_release=lambda *_: popup.dismiss())
         box.add_widget(btn)
         popup.content = box
@@ -1211,14 +1274,13 @@ class AudioBookApp(App, WakelockFgMixin):
 
         preview = Label(text=self._paragraphs[index][:70], font_size="12sp",
                         size_hint_y=None, height=dp(44), halign="left",
-                        valign="top", color=C_DIM)
+                        valign="top")
         preview.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, w.height)))
         box.add_widget(preview)
 
-        def _action(text, callback, color=(.24, .27, .32, 1)):
-            btn = Button(text=text, size_hint_y=None, height=dp(46),
-                         background_normal="", background_color=color,
-                         color=(1, 1, 1, 1), font_size="13sp")
+        def _action(text, callback, color=None):
+            btn = ABButton(text=text, size_hint_y=None, height=dp(46),
+                           font_size="13sp")
             def _run(*_):
                 popup.dismiss()
                 callback()
@@ -1283,11 +1345,9 @@ class AudioBookApp(App, WakelockFgMixin):
         inner.bind(minimum_height=inner.setter("height"))
         for bookmark in bookmarks:
             para = int(bookmark.get("para", 0))
-            btn = Button(text="第 %d 段 · %s" % (para + 1, bookmark.get("label", "")),
-                         size_hint_y=None, height=dp(46), halign="left",
-                         valign="middle", background_normal="",
-                         background_color=C_BTN, color=(1, 1, 1, 1),
-                         font_size="13sp")
+            btn = ABButton(text="第 %d 段 · %s" % (para + 1, bookmark.get("label", "")),
+                           size_hint_y=None, height=dp(46), halign="left",
+                           valign="middle", font_size="13sp")
             btn.bind(size=lambda w, *_: setattr(w, "text_size",
                                                 (w.width - dp(20), None)))
             btn.bind(on_release=lambda _b, p=para: self._goto_bookmark(popup, p))
@@ -1295,9 +1355,8 @@ class AudioBookApp(App, WakelockFgMixin):
         scroll.add_widget(inner)
         box.add_widget(scroll)
 
-        btn_clear = Button(text="清空本书书签", size_hint_y=None, height=dp(46),
-                           background_normal="",
-                           background_color=C_DANGER, color=(1, 1, 1, 1))
+        btn_clear = ABDangerButton(text="清空本书书签", size_hint_y=None,
+                                   height=dp(46))
         def _clear(*_):
             popup.dismiss()
             self.clear_bookmarks()
@@ -1869,8 +1928,8 @@ class AudioBookApp(App, WakelockFgMixin):
                (_crash_last or "无"),
                (str(self._last_error)[:120] or "无"))
         )
-        _diag = Label(text=_diag_text, size_hint_y=None, height=dp(92),
-                      font_size="11sp", color=C_DIM, halign="left", valign="top")
+        _diag = ABDimLabel(text=_diag_text, size_hint_y=None, height=dp(92),
+                           font_size="11sp", halign="left", valign="top")
         _diag.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
         # 高度随文字自适应：否则错误信息一长就会溢出、盖住下面的控件
         _diag.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
@@ -1883,9 +1942,8 @@ class AudioBookApp(App, WakelockFgMixin):
         current = str(self._config.get("voice_name", ""))
         current_label = next((lbl for lbl, n in voice_labels.items() if n == current), None)
         spinner = Spinner(text=current_label or (list(voice_labels)[0] if voice_labels else "无可用音色"),
-                          values=list(voice_labels), size_hint_y=None, height=dp(44),
-                          background_normal="", background_color=C_BTN,
-                          color=(1, 1, 1, 1))
+                          values=list(voice_labels), size_hint_y=None, height=dp(44))
+        self._theme_bind(spinner)
 
         def _pick_voice(_s, text):
             name = voice_labels.get(text)
@@ -1930,15 +1988,22 @@ class AudioBookApp(App, WakelockFgMixin):
                                         self._on_line_height,
                                         fmt=lambda v: "%.1fx" % (v / 10.0)))
 
+        # ---- 主题（深色 / 浅色，点击即时切换并记忆）----
+        btn_theme = ABButton(
+            text=("当前：浅色（点按切换为深色）" if self.theme == "light"
+                  else "当前：深色（点按切换为浅色）"),
+            size_hint_y=None, height=dp(44))
+        btn_theme.bind(on_release=lambda *_: self._toggle_theme(btn_theme))
+        box.add_widget(btn_theme)
+
         # ---- 定时休眠 ----
         sleep_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
         sleep_row.add_widget(Label(text="定时休眠（分钟）", font_size="13sp"))
         spin_sleep = Spinner(text="30", values=["15", "30", "45", "60", "90", "120"],
-                             size_hint_x=None, width=dp(90), background_normal="",
-                             background_color=C_BTN, color=(1, 1, 1, 1))
-        btn_sleep = Button(text="启动", size_hint_x=None, width=dp(70),
-                           background_normal="", background_color=C_PRIMARY,
-                           color=(1, 1, 1, 1))
+                             size_hint_x=None, width=dp(90))
+        self._theme_bind(spin_sleep)
+        btn_sleep = ABPrimaryButton(text="启动", size_hint_x=None,
+                                    width=dp(70))
 
         def _start_sleep(*_):
             self._sleep_until = time.time() + int(spin_sleep.text) * 60
@@ -1952,19 +2017,15 @@ class AudioBookApp(App, WakelockFgMixin):
             self._toast("定时休眠已取消")
 
         btn_sleep.bind(on_release=_start_sleep)
-        btn_cancel_sleep = Button(text="取消", size_hint_x=None, width=dp(64),
-                                  background_normal="",
-                                  background_color=C_BTN,
-                                  color=(1, 1, 1, 1))
+        btn_cancel_sleep = ABButton(text="取消", size_hint_x=None,
+                                    width=dp(64))
         btn_cancel_sleep.bind(on_release=_cancel_sleep)
         sleep_row.add_widget(spin_sleep)
         sleep_row.add_widget(btn_sleep)
         sleep_row.add_widget(btn_cancel_sleep)
         box.add_widget(sleep_row)
 
-        btn_help = Button(text="使用说明", size_hint_y=None, height=dp(44),
-                          background_normal="",
-                          background_color=C_BTN, color=(1, 1, 1, 1))
+        btn_help = ABButton(text="使用说明", size_hint_y=None, height=dp(44))
         def _show_help(*_):
             popup.dismiss()
             self.show_usage_hint()
@@ -1972,24 +2033,20 @@ class AudioBookApp(App, WakelockFgMixin):
         box.add_widget(btn_help)
 
         # 熄屏/后台朗读要靠系统「不冻结本应用」——一键跳到省电白名单设置页。
-        btn_power = Button(text="省电白名单（后台不被冻结）", size_hint_y=None,
-                           height=dp(44), background_normal="",
-                           background_color=C_PRIMARY, color=(1, 1, 1, 1))
+        btn_power = ABPrimaryButton(text="省电白名单（后台不被冻结）",
+                                    size_hint_y=None, height=dp(44))
         btn_power.bind(on_release=lambda *_: self._open_power_settings())
         box.add_widget(btn_power)
 
         # 自启动 / 后台运行权限（各 ROM 是隐藏页，这里按包名逐个试跳转）
-        btn_auto = Button(text="自启动 / 后台权限", size_hint_y=None, height=dp(44),
-                          background_normal="", background_color=C_BTN,
-                          color=C_TEXT)
+        btn_auto = ABButton(text="自启动 / 后台权限", size_hint_y=None,
+                            height=dp(44))
         btn_auto.bind(on_release=lambda *_: self._open_autostart_settings())
         box.add_widget(btn_auto)
 
         # 主界面去掉了停止键（播放键改成暂停/继续切换），
         # 停止功能放这里，需要时还能用。
-        btn_stop = Button(text="停止朗读", size_hint_y=None, height=dp(44),
-                          background_normal="",
-                          background_color=C_BTN, color=C_TEXT)
+        btn_stop = ABButton(text="停止朗读", size_hint_y=None, height=dp(44))
         def _do_stop(*_):
             popup.dismiss()
             self._engine.stop()
@@ -2000,26 +2057,22 @@ class AudioBookApp(App, WakelockFgMixin):
 
         # ---- 备份 / 诊断 ----
         tools_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
-        btn_export = Button(text="导出书签/进度", size_hint_x=1,
-                            background_normal="", background_color=C_BTN,
-                            color=(1, 1, 1, 1), font_size="12sp")
+        btn_export = ABButton(text="导出书签/进度", size_hint_x=1,
+                              font_size="12sp")
         btn_export.bind(on_release=lambda *_: self._export_backup())
-        btn_export_log = Button(text="导出日志", size_hint_x=1,
-                                background_normal="", background_color=C_BTN,
-                                color=(1, 1, 1, 1), font_size="12sp")
+        btn_export_log = ABButton(text="导出日志", size_hint_x=1,
+                                  font_size="12sp")
         btn_export_log.bind(on_release=lambda *_: self._export_diag_log())
-        btn_share_log = Button(text="分享日志", size_hint_x=1,
-                               background_normal="", background_color=C_BTN,
-                               color=(1, 1, 1, 1), font_size="12sp")
+        btn_share_log = ABButton(text="分享日志", size_hint_x=1,
+                                 font_size="12sp")
         btn_share_log.bind(on_release=lambda *_: self._share_diag_log())
         tools_row.add_widget(btn_export)
         tools_row.add_widget(btn_export_log)
         tools_row.add_widget(btn_share_log)
         box.add_widget(tools_row)
 
-        btn_close = Button(text="关闭", size_hint_y=None, height=dp(46),
-                           background_normal="", background_color=C_PRIMARY,
-                           color=(1, 1, 1, 1))
+        btn_close = ABPrimaryButton(text="关闭", size_hint_y=None,
+                                    height=dp(46))
         btn_close.bind(on_release=lambda *_: popup.dismiss())
         box.add_widget(btn_close)
         _sv = ScrollView()
@@ -2044,6 +2097,39 @@ class AudioBookApp(App, WakelockFgMixin):
     def _on_pitch(self, value):
         self._engine.set_pitch(int(value))
         self._config.set("pitch", int(value))
+
+    def _apply_theme_colors(self, *_):
+        """把当前主题的颜色刷进 theme_* 属性 —— KV 绑定会传播到全部控件。"""
+        t = _THEMES[self.theme]
+        self.theme_bg = t["bg"]
+        self.theme_btn = t["btn"]
+        self.theme_primary = t["primary"]
+        self.theme_danger = t["danger"]
+        self.theme_text = t["text"]
+        self.theme_dim = t["dim"]
+        try:
+            from kivy.core.window import Window
+            Window.clearcolor = t["bg"]
+        except Exception:
+            pass
+
+    def _toggle_theme(self, btn=None):
+        """深色 ↔ 浅色切换：改属性即全界面即时生效，配置落盘。"""
+        self.theme = "light" if self.theme == "dark" else "dark"
+        self._config.set("theme", self.theme)
+        self._config.save()
+        self._apply_theme_colors()
+        if btn is not None:
+            btn.text = ("当前：浅色（白底黑字）" if self.theme == "light"
+                        else "当前：深色（黑底白字）")
+
+    def _theme_bind(self, widget):
+        """让非主题控件类的控件（如 Spinner）颜色跟随主题属性。"""
+        for prop, tprop in (("background_color", "theme_btn"),
+                            ("color", "theme_text")):
+            setattr(widget, prop, getattr(self, tprop))
+            self.bind(**{tprop: (lambda inst, val, w=widget, p=prop:
+                                 setattr(w, p, val))})
 
     def _on_speed(self, value):
         speed = value / 10.0
