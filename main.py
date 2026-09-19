@@ -156,6 +156,20 @@ KV = """
 
 <Popup>:
     title_color: app.theme_text
+
+# 正文容器：背景随主题（与按钮同一绑定路径，设备上已验证可靠；
+# 之前用 python self.bind 回调在设备上没有生效）
+<ABBody>:
+    canvas.before:
+        Color:
+            rgba: app.theme_bg
+        Rectangle:
+            pos: self.pos
+            size: self.size
+
+<Spinner>:
+    background_color: app.theme_btn
+    color: app.theme_text
     canvas.before:
         Color:
             rgba: self.background_color
@@ -240,6 +254,11 @@ class ABDangerButton(ABButton):
 
 class ABDimLabel(Label):
     """次要文字标签（提示、说明、自检信息）。"""
+    pass
+
+
+class ABBody(FloatLayout):
+    """正文容器：背景色由 KV 规则绑定 app.theme_bg，随主题即时切换。"""
     pass
 
 # 用户自己翻过之后，暂停「朗读自动跟随」的秒数。
@@ -409,8 +428,7 @@ class AudioBookApp(App, WakelockFgMixin):
         # **纯黑**，看起来就像「顶部压了一层黑色覆盖层」。这里真正把它用上。
         try:
             from kivy.core.window import Window
-            Window.clearcolor = C_BG   # 初值；之后随 theme_bg 属性联动
-            self.bind(theme_bg=lambda _o, v: setattr(Window, "clearcolor", v))
+            Window.clearcolor = C_BG   # 初值；_apply_theme_colors 随主题直接刷新
         except Exception:
             pass
         # 启动阶段的任何异常都渲染到屏幕上。
@@ -572,16 +590,7 @@ class AudioBookApp(App, WakelockFgMixin):
         # 番茄小说也是按章加载的。单章中位 130 段、最多 400 段，
         # 用普通控件即可，而且高度由 Kivy 自动算准
         # （RecycleView 对「高度不定的文本条目」反而算不准）。
-        body = FloatLayout(size_hint_y=1)  # BoxLayout 会把它撑到占满中间剩余空间
-        # 双重保险：body 自己画上 C_BG。即便 Window.clearcolor 没生效或被覆盖，
-        # 正文区里的空白也显示为深灰（页面背景），不会再露 Window 默认纯黑。
-        from kivy.graphics import Color, Rectangle
-        with body.canvas.before:
-            self._body_bg_color = Color(*C_BG)
-            rect = Rectangle(pos=body.pos, size=body.size)
-        self.bind(theme_bg=lambda _o, v: setattr(self._body_bg_color, "rgba", v))
-        body.bind(pos=lambda w, v: setattr(rect, "pos", v),
-                  size=lambda w, v: setattr(rect, "size", v))
+        body = ABBody(size_hint_y=1)  # KV 绑定背景色随主题；BoxLayout 撑满中间剩余空间
         self._body = body          # 记住容器：_update_hint 要摘挂提示层
         self._top_w = top
         self._scroll = self._make_scroll()
@@ -685,12 +694,11 @@ class AudioBookApp(App, WakelockFgMixin):
         # 停止功能挪到「设置」里，主界面保持干净）。
         # 高度额外加上系统导航栏高度，把这一条一直铺到屏幕最底（不透明底色
         # 才能盖住任何溢出），同时让按钮留在导航条上方、点得到。
-        _nav = getattr(self, "_nav_dp", 0)
-        # ⚠️ 按钮要贴住窗口底端：系统导航栏高度折算进 ctrl 的**顶部**留白，
-        # 不再垫在按钮下面。在窗口没有延伸到系统导航条下方的设备上，
-        # 原来的底部垫高会让按钮悬空一大截（实测反馈），必须贴底。
-        ctrl = BoxLayout(size_hint_y=None, height=dp(58) + dp(_nav), spacing=dp(8),
-                         padding=[dp(12), dp(5) + dp(_nav), dp(12), dp(5)])
+        # ⚠️ 不再预留系统导航栏高度：窗口没有延伸到导航条下方的设备上，
+        # 这段预留只会把进度行和按钮之间的空隙撑大（实测反馈）。
+        # 正文区因此多出导航栏高度的显示空间。
+        ctrl = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(8),
+                         padding=[dp(12), dp(5), dp(12), dp(5)])
         self.btn_prev_ch = _mk_btn("◀◀ 上一章")
         self.btn_prev_ch.bind(on_release=lambda *_: self.jump_chapter(-1))
 
@@ -1946,7 +1954,6 @@ class AudioBookApp(App, WakelockFgMixin):
         current_label = next((lbl for lbl, n in voice_labels.items() if n == current), None)
         spinner = Spinner(text=current_label or (list(voice_labels)[0] if voice_labels else "无可用音色"),
                           values=list(voice_labels), size_hint_y=None, height=dp(44))
-        self._theme_bind(spinner)
 
         def _pick_voice(_s, text):
             name = voice_labels.get(text)
@@ -2004,7 +2011,6 @@ class AudioBookApp(App, WakelockFgMixin):
         sleep_row.add_widget(Label(text="定时休眠（分钟）", font_size="13sp"))
         spin_sleep = Spinner(text="30", values=["15", "30", "45", "60", "90", "120"],
                              size_hint_x=None, width=dp(90))
-        self._theme_bind(spin_sleep)
         btn_sleep = ABPrimaryButton(text="启动", size_hint_x=None,
                                     width=dp(70))
 
@@ -2125,14 +2131,6 @@ class AudioBookApp(App, WakelockFgMixin):
         if btn is not None:
             btn.text = ("当前：浅色（白底黑字）" if self.theme == "light"
                         else "当前：深色（黑底白字）")
-
-    def _theme_bind(self, widget):
-        """让非主题控件类的控件（如 Spinner）颜色跟随主题属性。"""
-        for prop, tprop in (("background_color", "theme_btn"),
-                            ("color", "theme_text")):
-            setattr(widget, prop, getattr(self, tprop))
-            self.bind(**{tprop: (lambda inst, val, w=widget, p=prop:
-                                 setattr(w, p, val))})
 
     def _on_speed(self, value):
         speed = value / 10.0
