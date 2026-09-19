@@ -121,6 +121,7 @@ else:                                        # 字体缺失时给个明确提示
 # 请求码：文件选择器
 REQUEST_PICK_BOOK = 1001
 REQUEST_EXPORT_CFG = 1002   # 导出书签/进度备份（ACTION_CREATE_DOCUMENT）
+REQUEST_EXPORT_LOG = 1003   # 导出诊断日志（ACTION_CREATE_DOCUMENT）
 
 KV = """
 # ============================================================
@@ -678,7 +679,8 @@ class AudioBookApp(App, WakelockFgMixin):
 
     def _on_activity_result(self, request_code, result_code, intent):
         """SAF 选择器返回：书本 → 复制后打开；.json → 备份导入；导出码 → 落盘。"""
-        if request_code not in (REQUEST_PICK_BOOK, REQUEST_EXPORT_CFG):
+        if request_code not in (REQUEST_PICK_BOOK, REQUEST_EXPORT_CFG,
+                                REQUEST_EXPORT_LOG):
             return
         try:
             from android import activity
@@ -695,6 +697,10 @@ class AudioBookApp(App, WakelockFgMixin):
                 content = self._config.export_data()
                 ok = self._write_uri_text(uri, content)
                 self._post_to_main(lambda: self._toast("备份已导出" if ok else "导出失败"))
+                return
+            if request_code == REQUEST_EXPORT_LOG:
+                ok = self._write_uri_text(uri, self._diag_text(limit=200000))
+                self._post_to_main(lambda: self._toast("诊断日志已导出" if ok else "导出失败"))
                 return
             # 打开书本 / 导入备份：按扩展名分流
             resolver = None
@@ -782,8 +788,13 @@ class AudioBookApp(App, WakelockFgMixin):
         except Exception as err:
             self._toast(f"导出失败：{err}")
 
-    def _share_diag_log(self):
-        """把 diag.log（含最近崩溃）以纯文本分享出去，方便反馈问题。"""
+    def _diag_text(self, limit=1500):
+        """收集 diag.log + 最近崩溃记录（截尾保留最近的 limit 字符）。
+
+        ⚠️ 分享用的纯文本千万别太大：OriginOS 等国产 ROM 的分享面板会给每个
+        渠道渲染内容预览，EXTRA_TEXT 一大（几千字符）面板就会卡死整个界面
+        —— 实测「选完分享渠道后软件卡死」就是这个原因。
+        """
         content = ""
         try:
             with open(_DIAG.get("path", ""), encoding="utf-8") as f:
@@ -799,7 +810,30 @@ class AudioBookApp(App, WakelockFgMixin):
             pass
         if not content.strip():
             content = "(日志为空)"
-        content = content[-8000:]      # Intent 太大系统会拒，截尾保留最近的
+        return content[-limit:]
+
+    def _export_diag_log(self):
+        """把诊断日志用 SAF「另存为」导出（与备份导出同款可靠路径）。"""
+        if not self._android():
+            self._toast("桌面日志文件：" + (_DIAG.get("path") or "-"))
+            return
+        try:
+            from android import activity
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            it = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            it.addCategory(Intent.CATEGORY_OPENABLE)
+            it.setType("text/plain")
+            it.putExtra(Intent.EXTRA_TITLE, "audiobook_diag.log")
+            activity.bind(on_activity_result=self._on_activity_result)
+            PythonActivity.mActivity.startActivityForResult(it, REQUEST_EXPORT_LOG)
+        except Exception as err:
+            self._toast(f"导出失败：{err}")
+
+    def _share_diag_log(self):
+        """把 diag.log（含最近崩溃）以纯文本分享出去，方便反馈问题。"""
+        content = self._diag_text(limit=1500)
         if not self._android():
             self._toast("桌面日志文件：" + (_DIAG.get("path") or "-"))
             return
@@ -1965,16 +1999,21 @@ class AudioBookApp(App, WakelockFgMixin):
         box.add_widget(btn_stop)
 
         # ---- 备份 / 诊断 ----
-        tools_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        tools_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
         btn_export = Button(text="导出书签/进度", size_hint_x=1,
                             background_normal="", background_color=C_BTN,
-                            color=(1, 1, 1, 1), font_size="13sp")
+                            color=(1, 1, 1, 1), font_size="12sp")
         btn_export.bind(on_release=lambda *_: self._export_backup())
-        btn_share_log = Button(text="分享诊断日志", size_hint_x=1,
+        btn_export_log = Button(text="导出日志", size_hint_x=1,
+                                background_normal="", background_color=C_BTN,
+                                color=(1, 1, 1, 1), font_size="12sp")
+        btn_export_log.bind(on_release=lambda *_: self._export_diag_log())
+        btn_share_log = Button(text="分享日志", size_hint_x=1,
                                background_normal="", background_color=C_BTN,
-                               color=(1, 1, 1, 1), font_size="13sp")
+                               color=(1, 1, 1, 1), font_size="12sp")
         btn_share_log.bind(on_release=lambda *_: self._share_diag_log())
         tools_row.add_widget(btn_export)
+        tools_row.add_widget(btn_export_log)
         tools_row.add_widget(btn_share_log)
         box.add_widget(tools_row)
 
