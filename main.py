@@ -811,8 +811,12 @@ class AudioBookApp(App, WakelockFgMixin):
             send.setType("text/plain")
             send.putExtra(Intent.EXTRA_SUBJECT, "AudioBookReader 诊断日志")
             send.putExtra(Intent.EXTRA_TEXT, content)
+            # ⚠️ createChooser 的第二参是 CharSequence（不是 String），
+            # pyjnius 不会自动把 Python str 匹配到 CharSequence 重载，
+            # 必须显式构造 java.lang.String（与 TTS speak() 同款坑）。
+            jtitle = autoclass("java.lang.String")("分享诊断日志")
             PythonActivity.mActivity.startActivity(
-                Intent.createChooser(send, "分享诊断日志"))
+                Intent.createChooser(send, jtitle))
         except Exception as err:
             self._toast(f"分享失败：{err}")
 
