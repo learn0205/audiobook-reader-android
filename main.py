@@ -686,8 +686,11 @@ class AudioBookApp(App, WakelockFgMixin):
         # 高度额外加上系统导航栏高度，把这一条一直铺到屏幕最底（不透明底色
         # 才能盖住任何溢出），同时让按钮留在导航条上方、点得到。
         _nav = getattr(self, "_nav_dp", 0)
+        # ⚠️ 按钮要贴住窗口底端：系统导航栏高度折算进 ctrl 的**顶部**留白，
+        # 不再垫在按钮下面。在窗口没有延伸到系统导航条下方的设备上，
+        # 原来的底部垫高会让按钮悬空一大截（实测反馈），必须贴底。
         ctrl = BoxLayout(size_hint_y=None, height=dp(58) + dp(_nav), spacing=dp(8),
-                         padding=[dp(12), dp(5), dp(12), dp(5) + dp(_nav)])
+                         padding=[dp(12), dp(5) + dp(_nav), dp(12), dp(5)])
         self.btn_prev_ch = _mk_btn("◀◀ 上一章")
         self.btn_prev_ch.bind(on_release=lambda *_: self.jump_chapter(-1))
 
