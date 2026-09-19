@@ -845,6 +845,103 @@ class AudioBookApp(App, WakelockFgMixin):
             self._on_error(f"导出失败：{err}")
             return False
 
+    def _open_history_popup(self, parent_popup=None):
+        """历史播放书籍：浏览 → 点击续播 / 单本删除 / 清空全部。"""
+        if parent_popup is not None:
+            parent_popup.dismiss()
+        items = self._config.get_history_items()
+        if not items:
+            self._toast("还没有历史播放记录")
+            return
+        popup = Popup(title="历史播放书籍（点书名续播，✕ 删除记录）",
+                      size_hint=(0.94, 0.8))
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(10))
+        scroll = ScrollView()
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4))
+        inner.bind(minimum_height=inner.setter("height"))
+
+        def _reopen(*_):
+            Clock.schedule_once(lambda _dt: self._open_history_popup(), 0)
+
+        for key, path, title, tstr in items:
+            exists = os.path.isfile(path)
+            is_cur = (path == self._book_path)
+            sub = []
+            if is_cur:
+                sub.append("当前书")
+            if not exists:
+                sub.append("文件缺失")
+            pos = self._config.get_position(key)
+            if pos:
+                sub.append("读到第 %d 段" % (pos[0] + 1))
+            sub.append(tstr if tstr else "时间未知")
+            row = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(6))
+            book_btn = ABButton(
+                text=title + ("（当前）" if is_cur else "")
+                     + chr(10) + "  ".join(sub),
+                halign="left", font_size="12sp")
+            book_btn.bind(size=lambda w, *_: setattr(
+                w, "text_size", (w.width - dp(16), None)))
+            book_btn.bind(on_release=lambda _b, p=path, pp=popup:
+                          self._open_history_book(p, pp))
+            # 当前书不允许删除（它的断点正被使用；删除也会被巡检立即重建）
+            del_btn = ABDangerButton(text="当前" if is_cur else "删除",
+                                     size_hint_x=None, width=dp(64),
+                                     font_size="12sp", disabled=is_cur)
+            del_btn.bind(on_release=lambda _b, k=key, pp=popup:
+                         self._remove_history_item(k, pp))
+            row.add_widget(book_btn)
+            row.add_widget(del_btn)
+            inner.add_widget(row)
+        scroll.add_widget(inner)
+
+        bottom = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        btn_clear = ABDangerButton(text="清空全部记录", size_hint_x=1,
+                                   font_size="13sp")
+        btn_clear.bind(on_release=lambda *_: self._clear_play_history(popup))
+        bottom.add_widget(btn_clear)
+        inner.add_widget(bottom)
+
+        box.add_widget(scroll)
+        btn_close = ABPrimaryButton(text="关闭", size_hint_y=None, height=dp(46))
+        btn_close.bind(on_release=lambda *_: popup.dismiss())
+        box.add_widget(btn_close)
+        popup.content = box
+        popup.open()
+
+    def _remove_history_item(self, key, popup):
+        """删除一条历史（连同该书的断点/书签）。当前书在列表里禁用删除。"""
+        self._config.remove_book_data(key)
+        self._config.save()
+        if popup is not None:
+            popup.dismiss()
+        Clock.schedule_once(lambda _dt: self._open_history_popup(), 0)
+        self._toast("已从历史移除")
+
+    def _clear_play_history(self, popup):
+        """清空全部历史；当前书（若在阅读）保留断点/书签防丢进度，
+        因此清空后列表里可能仍显示当前书——这是有意设计。"""
+        self._config.clear_book_data(keep_key=self._book_key)
+        self._config.save()
+        if popup is not None:
+            popup.dismiss()
+        Clock.schedule_once(lambda _dt: self._open_history_popup(), 0)
+        self._toast("历史已清空（当前书保留）")
+
+    def _open_history_book(self, path, popup=None):
+        """点击历史书名 → 打开并续播到它自己的断点。"""
+        if popup is not None:
+            popup.dismiss()
+        target = path
+        if not os.path.isfile(target):
+            alt = os.path.join(self.user_data_dir, "books",
+                               os.path.basename(target))
+            target = alt if os.path.isfile(alt) else None
+        if target is None:
+            self._toast("该书的文件已不存在，无法打开")
+            return
+        self.open_book(target)
+
     def _export_backup(self):
         """导出书签/进度备份（系统「另存为」对话框）。"""
         if not self._android():
@@ -1006,6 +1103,7 @@ class AudioBookApp(App, WakelockFgMixin):
         # ⚠️ 「上次打开的书」必须**尽早落盘**：以前这句放在方法最后，只要后面
         #    任何一步（_refresh_view / _set_highlight …）抛异常，就永远存不上，
         #    表现为「每次打开 App 都要重新选书」。解析成功就立刻存。
+        self._config.touch_history(self._book_key, doc.path, doc.title)
         self._config.set("last_book", doc.path)
         self._config.save()
 
@@ -2063,6 +2161,11 @@ class AudioBookApp(App, WakelockFgMixin):
             self._toast("已停止朗读")
         btn_stop.bind(on_release=_do_stop)
         box.add_widget(btn_stop)
+
+        # ---- 历史播放书籍 ----
+        btn_hist = ABButton(text="历史播放书籍", size_hint_y=None, height=dp(44))
+        btn_hist.bind(on_release=lambda *_: self._open_history_popup(popup))
+        box.add_widget(btn_hist)
 
         # ---- 备份 / 诊断 ----
         tools_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))

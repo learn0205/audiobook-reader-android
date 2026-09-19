@@ -118,11 +118,31 @@ def test_config_backup():
     ok = cm2.get("last_book") == "/tmp/x.txt" and cm2.get_position("k1")[0] == 7
     check("config: 备份导出/导入", ok, "")
 
+def test_history():
+    import time as _t
+    from config_manager import ConfigManager
+    cm = ConfigManager(os.path.join(tempfile.mkdtemp(), "c.json"))
+    cm.touch_history("k1", "/p/a.txt", "甲书"); cm.set_position("k1", 3, 10)
+    cm.touch_history("k2", "/p/b.txt", "乙书"); cm.set_position("k2", 1, 0)
+    order = [it[2] for it in cm.get_history_items()]
+    check("history: 最近打开的排前面", order == ["乙书", "甲书"], str(order))
+    cm.remove_book_data("k1")
+    left = [it[2] for it in cm.get_history_items()]
+    check("history: 单本删除", left == ["乙书"], str(left))
+    cm.clear_book_data(keep_key="k2")
+    hist = cm.get_history_items()
+    pos_ok = cm.get_position("k2") == (1, 0)
+    hist_core = [(k, path, title) for k, path, title, _ in hist]
+    check("history: 清空后当前书保留(书名/断点)",
+          hist_core == [("k2", "/p/b.txt", "乙书")] and pos_ok,
+          "hist=%s" % hist)
+
 
 def main_run():
     test_layout()
     test_edge_flow()
     test_config_backup()
+    test_history()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 

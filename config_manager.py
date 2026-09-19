@@ -34,6 +34,7 @@ DEFAULTS = {
     "show_chapters": True, # 是否显示章节目录侧边栏
     "positions": {},       # 阅读断点：{书籍key: {"para": 段落号, "char": 字符数, "time": 时间}}
     "bookmarks": {},       # 书签：{书籍key: [{"para": 段落号, "label": 摘要, "time": 时间}]}
+    "history": {},         # 播放历史：{书籍key: {"path": 路径, "title": 书名, "time": 时间}}
 }
 
 
@@ -69,6 +70,72 @@ class ConfigManager:
             pass  # 首次运行，使用默认配置
         except Exception as err:
             print(f"[配置] 读取失败，使用默认配置：{err}")
+
+    # ---------------- 播放历史 ----------------
+    def touch_history(self, book_key: str, path: str, title: str):
+        """打开书成功时调用：记入/刷新播放历史（时间取当前）。"""
+        hist = self._data.setdefault("history", {})
+        ts = time.time()
+        for h in hist.values():       # Windows 时钟粒度粗：保证 ts 严格递增
+            if h.get("ts", 0) >= ts:
+                ts = h.get("ts", 0) + 1e-3
+        hist[book_key] = {
+            "path": path,
+            "title": title or os.path.basename(path),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": ts,
+        }
+
+    def get_history_items(self):
+        """合并 history 与 positions 的全部书籍，按最近时间降序。
+
+        返回 [(book_key, 路径, 书名, 时间文本), ...]。
+        旧版本没有 history 时也能工作：从 positions 的 key（规范化路径）
+        反推，书名退化为文件名。
+        """
+        import os as _os
+        items = {}
+        _ts = {}
+        for key, h in self._data.get("history", {}).items():
+            path = h.get("path", key)
+            items[key] = (key, path,
+                          h.get("title") or _os.path.basename(path),
+                          h.get("time", ""))
+            _ts[key] = h.get("ts", 0)
+        for key, pos in self._data.get("positions", {}).items():
+            if key not in items:
+                items[key] = (key, key, _os.path.basename(key),
+                              pos.get("time", "") if isinstance(pos, dict) else "")
+                _ts[key] = 0             # 只有断点没有历史的旧记录 → 排到最后
+        return [items[k] for k in sorted(items, key=lambda k: _ts.get(k, 0),
+                                         reverse=True)]
+
+    def remove_book_data(self, book_key: str, keep_position: bool = False):
+        """从历史中移除一本书（连带断点与书签）。
+
+        keep_position=True 时保留断点（用于"删除的书正是当前打开的书"，
+        免得正在读的进度被清掉）。
+        """
+        self._data.get("history", {}).pop(book_key, None)
+        self._data.get("bookmarks", {}).pop(book_key, None)
+        if not keep_position:
+            self._data.get("positions", {}).pop(book_key, None)
+
+    def clear_book_data(self, keep_key: str = None):
+        """清空全部播放历史（连带断点与书签）。
+
+        keep_key = 需要保留的书籍 key（当前打开的书：历史/断点/书签都保留，
+        因此清空后列表里仍会显示当前书——有意设计，防丢正在读的进度）。
+        """
+        for sec in ("history", "bookmarks", "positions"):
+            d = self._data.get(sec, {})
+            if keep_key:
+                val = d.pop(keep_key, None)
+                d.clear()
+                if val is not None:
+                    d[keep_key] = val
+            else:
+                d.clear()
 
     def export_data(self) -> str:
         """把整份配置序列化成 JSON 文本（书签/断点备份导出用）。"""
