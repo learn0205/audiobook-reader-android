@@ -85,7 +85,10 @@ def test_edge_flow():
             "第二段开头，逗号不断句。第二段结束！"])
     total = len(e._sentences)
     e.play(0)
-    time.sleep(0.5)
+    # 等待预取生效：CI 机器慢，固定 sleep 会偶发超时误报 —— 轮询最多等 10 秒
+    deadline = time.time() + 10
+    while time.time() < deadline and len(calls) < 2:
+        time.sleep(0.05)
     early = len(calls)
     deadline = time.time() + 90
     while time.time() < deadline:
