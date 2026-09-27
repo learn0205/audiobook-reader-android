@@ -1578,20 +1578,21 @@ class AudioBookApp(App, WakelockFgMixin):
         self._save_position()
 
     def _seek_to(self, index, tip):
-        """把进度挪到 index —— **默认暂停，不自动开始朗读**。
+        """把进度挪到 index —— **一律停在暂停状态**，点 ▶ 才开始念。
 
-        · 没在朗读（刚打开书 / 已暂停 / 已停止）→ 只定位并高亮，保持暂停，
-          等用户点底部 ▶ 才开始念（这是「默认暂停」的本意）；
-        · 正在朗读 → seek 会直接从新位置接着念，不打断正在听的这段。
+        上一章/下一章、目录选章、书签跳转都走这里。跳转本身是一次「重新
+        选位置」的操作，所以先把朗读停掉再定位：不管跳转前是不是在念，
+        跳完都是暂停态，由用户点底部 ▶ 决定什么时候开始。
+
+        ⚠️ 顺序不能反：pause() 之后再 seek —— pause 保留位置、并把状态置为
+        paused，此时 seek_paragraph 不会发声（它只在 PLAYING 时才接着念）。
         """
         index = max(0, min(int(index), len(self._paragraphs) - 1))
-        was_playing = self._engine.get_state() == STATE_PLAYING
-        if was_playing:
-            self._follow = True      # 还在念 → 跳过去后继续让高亮跟着走
+        self._engine.pause()        # 正在念就停下；没在念是空操作（状态不变）
         self._engine.seek_paragraph(index)
         self._set_highlight(index)
         self._save_position(persist=True)   # 跳转立刻落盘，杀掉也不丢
-        self._toast(tip if was_playing else tip + "（点 ▶ 开始朗读）")
+        self._toast(tip + "（点 ▶ 开始朗读）")
 
     def jump_chapter(self, delta):
         """跳到上一章 / 下一章的开头（默认暂停，点 ▶ 才开始念）。

@@ -335,6 +335,20 @@ def test_jump_default_paused():
             app.goto_chapter_index(1)
             app._goto_bookmark(_FakePopup(), 2)
         check("jump: 跳转不再调用 play()", not calls, "calls=%s" % calls)
+
+        # ---- 正在朗读时跳转：也必须先停下（不能跳过去接着念）----
+        pauses = []
+        orig_pause = app._engine.pause
+        try:
+            app._engine.get_state = lambda: STATE_PLAYING   # 假装正在念
+            app._engine.pause = lambda: pauses.append(1)
+            app.goto_chapter_index(1)      # 目录选章
+            app.jump_chapter(-1)           # 上一章
+            check("jump: 朗读中跳转先暂停、且不调 play",
+                  len(pauses) == 2 and not calls,
+                  "pause=%d play=%s" % (len(pauses), calls))
+        finally:
+            app._engine.pause = orig_pause
     finally:
         app._engine.play = orig_play
         app._engine.get_state = orig_state
