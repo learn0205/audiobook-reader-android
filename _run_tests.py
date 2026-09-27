@@ -6,6 +6,7 @@
   2) _v.py 的期望高度断言
   3) Edge 后端：逐句推进 + 播放期间预取 + 全句缓存（假合成，无网络）
   4) ConfigManager 备份导出/导入
+  5) 设置弹窗：文字不被裁切 + 深浅主题对比度达标（见 test_settings_popup）
 """
 import os
 import sys
@@ -26,15 +27,39 @@ def check(name, ok, detail=""):
     print("[{}] {} {}".format("PASS" if ok else "FAIL", name, detail))
 
 
+_TEST_APP = None
+_TEST_ROOT = None
+
+
+def shared_app():
+    """整个测试进程只建一个 AudioBookApp。
+
+    ⚠️ 不能建第二个：KV 类规则里的 `app.*` 引用的 App 实例是按规则缓存的，
+       第二个 App 建出来的控件仍然绑在第一个 App 的属性上 —— 换色检查会全部
+       假阳性（真机上永远只有一个 App，所以这只是测试环境的坑）。
+    """
+    global _TEST_APP, _TEST_ROOT
+    if _TEST_APP is None:
+        from kivy.config import Config
+        Config.set("graphics", "width", "400")
+        Config.set("graphics", "height", "800")
+        import main
+        _TEST_APP = main.AudioBookApp()
+        # ⚠️ 只调 build() 不会给 app.root 赋值（那是 run() 干的），自己存起来
+        _TEST_ROOT = _TEST_APP.build()
+    return _TEST_APP
+
+
+def shared_root():
+    shared_app()
+    return _TEST_ROOT
+
+
 def test_layout():
-    from kivy.config import Config
-    Config.set("graphics", "width", "400")
-    Config.set("graphics", "height", "800")
-    import main
-    app = main.AudioBookApp()
-    root = app.build()
-    root.size = (400, 800)
     from kivy.clock import Clock
+    app = shared_app()
+    root = shared_root()
+    root.size = (400, 800)
     for _ in range(10):
         Clock.tick()
         root.do_layout()
@@ -138,11 +163,124 @@ def test_history():
           "hist=%s" % hist)
 
 
+def _luminance(c):
+    def f(v):
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
+
+
+def _contrast(fg, bg):
+    a, b = _luminance(fg), _luminance(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def _walk(w):
+    yield w
+    for c in getattr(w, "children", []):
+        yield from _walk(c)
+
+
+def _open_settings(app):
+    from kivy.core.window import Window
+    from kivy.uix.popup import Popup
+    app.show_settings()
+    from kivy.clock import Clock
+    for _ in range(6):
+        Clock.tick()
+    for w in Window.children:
+        if isinstance(w, Popup) and w.title == "设置":
+            for kid in _walk(w):
+                # 非布局控件（Label/Button/Slider…）没有 do_layout，别硬调
+                getattr(kid, "do_layout", lambda: None)()
+            return w
+    return None
+
+
+def test_settings_popup():
+    """设置弹窗两条硬约束：
+
+    1) 文字不许被裁切 —— 每个有文字的控件都必须自己
+       「text_size 按宽度重排 + 高度跟着纹理长」，且不能超出内容区边界；
+       之前「定时休眠（分」被吃掉就是写死 height=dp(24) + 无 text_size 导致的。
+    2) 主题对比度 —— 两套主题下，文字相对它所在的底色都要 ≥ 4.5:1（WCAG AA），
+       否则浅色模式下会出现「浅底浅字」。
+    """
+    app = shared_app()
+    root = shared_root()
+    root.size = (400, 800)
+    from kivy.core.window import Window
+    from kivy.uix.label import Label
+    import main
+
+    try:
+        for width in (400, 360, 320):
+            Window.size = (width, int(width * 2.0))
+            Window.dispatch("on_resize", *Window.size)
+            for theme in ("dark", "light"):
+                if app.theme != theme:
+                    app._toggle_theme()
+                popup = _open_settings(app)
+                if popup is None:
+                    check("popup@%d/%s: 能打开设置弹窗" % (width, theme), False)
+                    continue
+                sv = popup.content
+                box = sv.children[0] if sv.children else None
+                off = (sv.x - box.x) if box is not None else 0.0
+                inside = set(id(w) for w in _walk(box)) if box is not None else set()
+
+                bad = []
+                for w in _walk(popup):
+                    if not hasattr(w, "text") or not (w.text or "").strip():
+                        continue
+                    tex = w.texture_size
+                    ts = w.text_size
+                    if ts[0] is None:
+                        bad.append("无 text_size: %r" % w.text[:12])
+                    elif tex[0] > ts[0] + 1:
+                        bad.append("横向被切 %r %.0f>%.0f" % (w.text[:12], tex[0], ts[0]))
+                    if tex[1] > w.height + 1:
+                        bad.append("纵向被切 %r h=%.0f 文字=%.0f"
+                                   % (w.text[:12], w.height, tex[1]))
+                    ax = w.x + (off if id(w) in inside else 0.0)
+                    if ax + w.width > sv.x + sv.width + 1 or ax < sv.x - 1:
+                        bad.append("超出边界 %r" % w.text[:12])
+
+                ratios = [
+                    ("主文字/弹窗底", _contrast(app.theme_text, app.theme_surface)),
+                    ("次要文字/弹窗底", _contrast(app.theme_dim, app.theme_surface)),
+                    ("按钮字/按钮底", _contrast(app.theme_text, app.theme_btn)),
+                    ("主按钮字/主色底", _contrast((1, 1, 1), app.theme_primary)),
+                ]
+                low = [n for n, v in ratios if v < 4.5]
+                check("popup@%d/%s: 文字未被裁切" % (width, theme), not bad,
+                      "; ".join(bad[:3]))
+                check("popup@%d/%s: 对比度≥4.5" % (width, theme), not low,
+                      " ".join("%s=%.1f" % kv for kv in ratios))
+
+                # 开着弹窗切主题：所有文字必须跟着换色（KV 绑定有效）
+                before = app.theme_text
+                app._toggle_theme()
+                stale = []
+                for w in _walk(popup):
+                    if isinstance(w, Label) and hasattr(w, "color"):
+                        if tuple(w.color) == tuple(before):
+                            stale.append(w.text[:8])
+                check("popup@%d/%s: 切主题即时换色" % (width, theme), not stale,
+                      "未刷新: %s" % ",".join(stale[:3]))
+                popup.dismiss()
+    finally:
+        app._stop_tick_loop()
+
+
 def main_run():
+    # ⚠️ 顺序不能随便调：test_edge_flow 依赖后台线程 tick Clock 的节奏，
+    #    前面跑过多 App 实例/频繁 Clock.tick() 会让它偶发 early=1。
+    #    所以「设置弹窗」这组不碰异步节奏的测试放在最后跑。
     test_layout()
     test_edge_flow()
     test_config_backup()
     test_history()
+    test_settings_popup()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 

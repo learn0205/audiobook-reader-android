@@ -43,6 +43,9 @@ from kivy.uix.recycleview import RecycleView
 from kivy.uix.recycleview.views import RecycleDataViewBehavior
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
+# SpinnerOption（下拉展开后的选项按钮）默认**不在** Factory 里，
+# KV 里写 <SpinnerOption> 规则必须先导入，否则加载 KV 会抛「Unknown class」。
+from kivy.uix.spinner import Spinner, SpinnerOption
 
 from book_parser import BookParseError
 from book_parser import load_book as parse_book_file
@@ -134,11 +137,34 @@ KV = """
     background_down: ''
     font_size: '14sp'
 
-# 主题感知控件：颜色绑定 app.theme_*（AudioBookApp 的 ListProperty），
-# 切换主题属性时全部已创建的控件即时刷新。
+# 主题兜底色：所有 Label / Button 的文字都跟着主题走（KV 里 app.theme_* 是
+# 绑定关系，切主题时**已创建**的控件全部即时刷新，不用重建界面）。
+# ⚠️ 顺序很重要：KV 规则是「后写的压先写的」，所以这条兜底规则**必须排在所有
+#    具体类之前**。写在最后会把 ABPrimaryButton 的白字也刷成主题色 ——
+#    主按钮就变成「浅字压蓝底 / 深字压蓝底」，两种主题的对比度都不达标。
+<Label>:
+    color: app.theme_text
+
+# 复选框是无文字的纯图标控件：默认图本身是浅色的，浅色主题（白底）下整个隐形。
+# CheckBox 的 canvas 用 self.color 给图着色，绑到主文字色即可两边都看得见。
+<CheckBox>:
+    color: app.theme_text
+
+# 主题感知控件：具体颜色绑定 app.theme_*。
+# ⚠️ 上面 <Button> 把 background_normal 置空后，Kivy 自带的按钮底图不再绘制，
+#    background_color 只剩一个“没人画它”的数值 —— 按钮其实是**全透明**的，
+#    深色/浅色底上都等于没有背景。所以这里必须自己用 canvas 画圆角矩形，
+#    否则弹窗里的字是直接压在弹窗底色上，永远谈不上有对比度。
 <ABButton>:
     background_color: app.theme_btn
     color: app.theme_text
+    canvas.before:
+        Color:
+            rgba: self.background_color
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
 
 <ABPrimaryButton>:
     background_color: app.theme_primary
@@ -151,11 +177,38 @@ KV = """
 <ABDimLabel>:
     color: app.theme_dim
 
-<Label>:
-    color: app.theme_text
-
+# ⚠️ 弹窗底色是 Kivy 自带的一张**灰色 9-patch 图**（atlas 里的
+#    modalview-background），它既不跟深色也跟浅色主题走：
+#    深色主题里它是块灰盘子（浅字压浅底 → 看不清），浅色主题里它是脏灰。
+#    改法：去掉这张图（background: ''），底色改由 canvas 按主题自己画。
 <Popup>:
+    background: ''
+    background_color: app.theme_surface
     title_color: app.theme_text
+    title_size: '15sp'
+    separator_color: app.theme_border
+    separator_height: dp(1)
+    canvas.before:
+        Color:
+            rgba: app.theme_surface
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(14)]
+
+# 下拉展开后的选项：同样是 Button（透明底 + 墨色字），不刷主题必定看不清。
+<SpinnerOption>:
+    size_hint_y: None
+    height: dp(46)
+    background_color: app.theme_btn
+    color: app.theme_text
+    canvas.before:
+        Color:
+            rgba: self.background_color
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
 
 # 正文容器：背景随主题（与按钮同一绑定路径，设备上已验证可靠；
 # 之前用 python self.bind 回调在设备上没有生效）
@@ -218,23 +271,35 @@ KV = """
 
 # ---- 配色（深色主题）----
 C_BG = (0.09, 0.10, 0.12, 1)        # 页面背景
-C_SURFACE = (0.13, 0.15, 0.18, 1)   # 顶栏 / 弹窗
-C_BTN = (0.18, 0.21, 0.26, 1)       # 普通按钮
-C_PRIMARY = (0.23, 0.51, 0.96, 1)   # 主按钮（播放）
+C_SURFACE = (0.14, 0.16, 0.20, 1)   # 顶栏 / 弹窗底色（比背景略亮，浮起来）
+C_BTN = (0.20, 0.23, 0.28, 1)       # 普通按钮
+C_PRIMARY = (0.16, 0.42, 0.88, 1)   # 主按钮（播放）：白字对比度 ≥ 4.5:1
 C_DANGER = (0.50, 0.22, 0.24, 1)    # 危险按钮（清空书签）
-C_TEXT = (0.90, 0.92, 0.95, 1)      # 主文字
-C_DIM = (0.55, 0.60, 0.68, 1)       # 次要文字
+C_TEXT = (0.92, 0.94, 0.97, 1)      # 主文字（对背景 ≥ 12:1）
+C_DIM = (0.62, 0.66, 0.73, 1)       # 次要文字（对背景 ≥ 6:1）
+C_BORDER = (0.24, 0.27, 0.33, 1)    # 分隔线 / 弹窗标题下划线
 
 # ---- 主题（设置里可切「深色 / 浅色」）----
 # 颜色不再直接写死给控件，而是绑定到 App 的 theme_* 属性（见 AudioBookApp），
 # KV 规则里用 app.theme_xxx 引用 —— 切换主题时全部控件即时刷新，无需重建界面。
+# ⚠️ 每个主题都必须同时给出「文字」与「它所在的底色」，两者要成对改动：
+#    只改背景不连带文字（或反之），就会出现「浅底浅字 / 深底深字」看不清。
 _THEMES = {
-    "dark": {"bg": C_BG, "btn": C_BTN, "primary": C_PRIMARY, "danger": C_DANGER,
+    "dark": {"bg": C_BG, "surface": C_SURFACE, "border": C_BORDER,
+             "btn": C_BTN, "primary": C_PRIMARY, "danger": C_DANGER,
              "text": C_TEXT, "dim": C_DIM},
-    "light": {"bg": (0.96, 0.96, 0.97, 1), "btn": (0.89, 0.91, 0.94, 1),
-              "primary": (0.16, 0.42, 0.90, 1), "danger": (0.80, 0.28, 0.30, 1),
-              "text": (0.10, 0.12, 0.16, 1), "dim": (0.42, 0.46, 0.52, 1)},
+    "light": {"bg": (0.955, 0.957, 0.965, 1), "surface": (1, 1, 1, 1),
+              "border": (0.84, 0.86, 0.89, 1),
+              "btn": (0.88, 0.90, 0.94, 1), "primary": (0.13, 0.39, 0.85, 1),
+              "danger": (0.78, 0.24, 0.26, 1),
+              "text": (0.09, 0.11, 0.15, 1), "dim": (0.40, 0.44, 0.50, 1)},
 }
+
+# 弹窗内的安全边距（布局用）：留给文字的缓冲，避免贴着弹窗边界被裁切。
+# 注意单位是 dp → 必须在运行时调用 dp() 换算，不能提前算死到模块常量里。
+def _popup_pad_x():      return dp(14)
+def _popup_pad_y():      return dp(12)
+def _popup_spacing():    return dp(12)
 
 
 class ABButton(Button):
@@ -361,6 +426,8 @@ class AudioBookApp(App, WakelockFgMixin):
     line_height = NumericProperty(1.0)   # 正文行距系数（1.0=系统默认，最大 2.0）
     theme = StringProperty("dark")       # 深色 / 浅色主题（设置里切换）
     theme_bg = ListProperty(C_BG)
+    theme_surface = ListProperty(C_SURFACE)   # 弹窗 / 面板底色
+    theme_border = ListProperty(C_BORDER)     # 分隔线
     theme_btn = ListProperty(C_BTN)
     theme_primary = ListProperty(C_PRIMARY)
     theme_danger = ListProperty(C_DANGER)
@@ -1942,14 +2009,120 @@ class AudioBookApp(App, WakelockFgMixin):
         self._toast("从「%s」开始朗读" % title[:18])
 
 
+    # ============================================================
+    #      排版辅助：给文本留安全边距（弹窗专用）
+    #
+    # 之前弹窗里到处是 `Label(...) + size_hint_y=None, height=dp(24)` 的固定高度：
+    # 文字一多、屏幕一窄，Label 既不换行也不长高，多出来的字就横向/纵向溢出，
+    # 被 ScrollView 的裁剪框和弹窗边界切掉（典型就是「定时休眠（分」被吃掉一半）。
+    # 下面两个工具把这件事统一掉：**宽度变了按框重排，文字变高就让控件跟着长高**。
+    # ============================================================
+    def _auto_label(self, text, font_size="13sp", size_hint_x=1, width=None,
+                    min_height=0, halign="left", valign="center",
+                    margin=None):
+        """建一个不会被裁切的 Label：留边距 + 自动换行 + 自动长高。"""
+        # ⚠️ dp() 必须在**运行时**算：写进默认参数会在 import 时求值，那会儿
+        #    屏幕密度还没确定（真机上是 1 以外的值），等于写死了一个错误倍数。
+        margin = dp(6) if margin is None else margin
+        _min = max(dp(20), float(min_height or 0))
+        kw = dict(text=text, font_size=font_size, halign=halign,
+                  valign=valign, size_hint_y=None, height=_min)
+        if width is not None:
+            kw.update(size_hint_x=None, width=width)
+        else:
+            kw["size_hint_x"] = size_hint_x
+        lbl = Label(**kw)
+
+        def _fit(w, *_):
+            # 宽度变了立刻按新宽度重排：文字只在框内换行，不会横向溢出
+            w.text_size = (max(0.0, w.width - 2 * margin), None)
+
+        def _grow(w, *_):
+            # 换行几行就长多高：写死 height 会把第二行压到框外看不见
+            h = max(_min, float(w.texture_size[1]) + 2 * margin)
+            if abs(h - w.height) > 0.5:
+                w.height = h
+
+        lbl.bind(size=_fit, texture_size=_grow)
+        _fit(lbl)
+        _grow(lbl)
+        return lbl
+
+    def _safe_text(self, w, min_height=None, margin=None):
+        """给已有文字控件（Button / Spinner / Label）套上同一套安全排版规则。
+
+        原本 `size_hint_y=None, height=dp(44)` 写死的按钮，屏幕窄或字多时
+        会直接溢出；改成自在换行 + 自动长高后，内容永远不会跑到框外面。
+        """
+        if min_height is None:
+            min_height = dp(44)
+        if margin is None:
+            margin = dp(10)
+        try:
+            if w.size_hint_y is not None:      # 原来由父布局拉满 → 改成自己算高度
+                w.size_hint_y = None
+                w.height = max(min_height, float(w.height or 0))
+            else:
+                w.height = max(min_height, float(w.height or 0))
+        except Exception:
+            pass
+
+        def _fit(x, *_):
+            x.text_size = (max(0.0, x.width - 2 * margin), None)
+
+        def _grow(x, *_):
+            h = max(min_height, float(x.texture_size[1]) + 2 * dp(7))
+            if abs(h - x.height) > 0.5:
+                x.height = h
+
+        w.bind(size=_fit, texture_size=_grow)
+        _fit(w)
+        _grow(w)
+        return w
+
+    def _clip_text(self, w, margin=None):
+        """宽度写死的控件（下拉框 / 定时休眠的两个按钮）：只约束横向排版。
+
+        高度仍然由父布局决定（它们 size_hint_y=1 撑满行高），所以这里**不能**
+        顺手改 size_hint_y —— 只做「文字不许横着跑出边框」。
+        """
+        margin = dp(6) if margin is None else margin
+        w.bind(size=lambda x, *_: setattr(
+            x, "text_size", (max(0.0, x.width - 2 * margin), None)))
+        return w
+
+    def _auto_row(self, row, min_height=None):
+        """行高跟内容走：行内的 Label 换行后，这一行同时长高。
+
+        只统计 size_hint_y=None 的子控件（它们的高度是自己算的）；
+        撑满高度的（Slider / CheckBox / 按钮）跟随行高，不能反过来决定行高，
+        否则行高与子控件高度互相依赖会死循环。
+        """
+        if min_height is None:
+            min_height = dp(46)
+
+        def _sync(*_):
+            hs = [c.height for c in row.children
+                  if getattr(c, "size_hint_y", None) is None]
+            row.height = max([min_height] + hs)
+
+        for c in row.children:
+            if getattr(c, "size_hint_y", None) is None:
+                c.bind(height=_sync)
+        _sync()
+        return row
+
     def show_settings(self):
         """设置面板：音色 / 音调 / 语速 / 语调起伏 / 字号 / 定时休眠。"""
         from kivy.uix.checkbox import CheckBox
-        from kivy.uix.spinner import Spinner
 
         popup = Popup(title="设置", size_hint=(0.92, 0.88))
         # 内容较多（尤其小屏），放进 ScrollView，避免最下面的按钮被挤出弹窗
-        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12),
+        # padding = 横向/纵向安全边距：文字不再紧贴弹窗边界（贴边就是被裁切的那一刀）
+        # spacing = 排与排之间的垂直间距：挨太近时，Label 换行长出来的第二行会压到下一排
+        box = BoxLayout(orientation="vertical", spacing=_popup_spacing(),
+                        padding=[_popup_pad_x(), _popup_pad_y(),
+                                 _popup_pad_x(), _popup_pad_y() + dp(4)],
                         size_hint_y=None)
         box.bind(minimum_height=box.setter("height"))
 
@@ -2039,14 +2212,16 @@ class AudioBookApp(App, WakelockFgMixin):
         )
         _diag = ABDimLabel(text=_diag_text, size_hint_y=None, height=dp(92),
                            font_size="11sp", halign="left", valign="top")
-        _diag.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
-        # 高度随文字自适应：否则错误信息一长就会溢出、盖住下面的控件
-        _diag.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+        # 左右各留 dp(10) 安全边距；高度随文字自适应，错误信息再长也不溢出
+        _diag.bind(size=lambda w, *_: setattr(
+            w, "text_size", (max(0.0, w.width - dp(10)), None)))
+        _diag.bind(texture_size=lambda w, *_: setattr(
+            w, "height", max(dp(92), w.texture_size[1] + dp(14))))
         box.add_widget(_diag)
 
         # ---- 音色 ----
-        box.add_widget(Label(text="音色（系统引擎 + Edge 在线）", size_hint_y=None,
-                             height=dp(24), font_size="13sp"))
+        box.add_widget(self._auto_label("音色（系统引擎 + Edge 在线）",
+                                        font_size="13sp", min_height=dp(24)))
         voice_labels = {v["label"]: v["name"] for v in getattr(self, "_voice_list", [])}
         current = str(self._config.get("voice_name", ""))
         current_label = next((lbl for lbl, n in voice_labels.items() if n == current), None)
@@ -2060,7 +2235,8 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._config.set("voice_name", name)
                 self._config.save()
         spinner.bind(text=_pick_voice)
-        box.add_widget(spinner)
+        # 音色名可能很长：同样按「留边距 + 自动长高」排，别让它顶出弹窗
+        box.add_widget(self._safe_text(spinner, min_height=dp(44)))
 
         # ---- 音调 ----
         box.add_widget(self._slider_row("音调", -10, 10,
@@ -2072,8 +2248,9 @@ class AudioBookApp(App, WakelockFgMixin):
                                         self._on_speed, fmt=lambda v: "%.1fx" % (v / 10.0)))
 
         # ---- 语调起伏 ----
-        row = BoxLayout(size_hint_y=None, height=dp(40))
-        row.add_widget(Label(text="语调起伏（自然抑扬顿挫）", font_size="13sp"))
+        row = BoxLayout(size_hint_y=None, spacing=dp(8))
+        row.add_widget(self._auto_label("语调起伏（自然抑扬顿挫）",
+                                        font_size="13sp", min_height=dp(24)))
         chk = CheckBox(active=bool(self._config.get("intonation", True)),
                        size_hint_x=None, width=dp(44))
 
@@ -2083,7 +2260,7 @@ class AudioBookApp(App, WakelockFgMixin):
             self._config.save()
         chk.bind(active=_toggle)
         row.add_widget(chk)
-        box.add_widget(row)
+        box.add_widget(self._auto_row(row, dp(46)))
 
         # ---- 字号 ----
         box.add_widget(self._slider_row("字号", 10, 30,
@@ -2102,15 +2279,19 @@ class AudioBookApp(App, WakelockFgMixin):
                   else "当前：深色（点按切换为浅色）"),
             size_hint_y=None, height=dp(44))
         btn_theme.bind(on_release=lambda *_: self._toggle_theme(btn_theme))
-        box.add_widget(btn_theme)
+        box.add_widget(self._safe_text(btn_theme, min_height=dp(44)))
 
         # ---- 定时休眠 ----
-        sleep_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
-        sleep_row.add_widget(Label(text="定时休眠（分钟）", font_size="13sp"))
+        # 这一排原来横向挤了 4 个控件（90+70+64 + 标签），窄屏上标签只剩二三十 dp，
+        # 字纵向溢出就是这里被切成了「定时休眠（分」。现在：右边三个控件让出宽度，
+        # 标签开启自动换行 + 自动长高，行高跟着内容走，宁可占两行也不切字。
+        sleep_row = BoxLayout(size_hint_y=None, spacing=dp(8))
+        sleep_row.add_widget(self._auto_label("定时休眠（分钟）", font_size="13sp",
+                                              min_height=dp(28)))
         spin_sleep = Spinner(text="30", values=["15", "30", "45", "60", "90", "120"],
-                             size_hint_x=None, width=dp(90))
+                             size_hint_x=None, width=dp(78))
         btn_sleep = ABPrimaryButton(text="启动", size_hint_x=None,
-                                    width=dp(70))
+                                    width=dp(58))
 
         def _start_sleep(*_):
             self._sleep_until = time.time() + int(spin_sleep.text) * 60
@@ -2125,31 +2306,53 @@ class AudioBookApp(App, WakelockFgMixin):
 
         btn_sleep.bind(on_release=_start_sleep)
         btn_cancel_sleep = ABButton(text="取消", size_hint_x=None,
-                                    width=dp(64))
+                                    width=dp(54))
         btn_cancel_sleep.bind(on_release=_cancel_sleep)
+        # 窄屏上就算换行全显示出来，标签若被压成一竖条（一两个字一行）也没法看 ——
+        # 所以宽度不够时，右边三个控件整体按比例收一点，优先保证标签够写一行。
+        _need_label = dp(120)        # 标签一行写完「定时休眠（分钟）」所需的最小宽度
+        _base_w = {spin_sleep: dp(78), btn_sleep: dp(58), btn_cancel_sleep: dp(54)}
+
+        def _fit_sleep_row(*_):
+            avail = sleep_row.width
+            if avail <= 0:
+                return
+            fixed = sum(_base_w.values()) + 3 * dp(8)
+            free = avail - fixed
+            k = (1.0 if free >= _need_label
+                 else max(0.62, (avail - _need_label) / fixed))
+            for w_, base in _base_w.items():
+                w_.width = base * k     # text_size 由 _clip_text 绑 size 自动跟上
+
+        sleep_row.bind(width=_fit_sleep_row)
+        _fit_sleep_row()
+        # 这三个控件的高度由行决定，只约束横向排版（文字不许跑出边框）
+        self._clip_text(spin_sleep)
+        self._clip_text(btn_sleep)
+        self._clip_text(btn_cancel_sleep)
         sleep_row.add_widget(spin_sleep)
         sleep_row.add_widget(btn_sleep)
         sleep_row.add_widget(btn_cancel_sleep)
-        box.add_widget(sleep_row)
+        box.add_widget(self._auto_row(sleep_row, dp(48)))
 
         btn_help = ABButton(text="使用说明", size_hint_y=None, height=dp(44))
         def _show_help(*_):
             popup.dismiss()
             self.show_usage_hint()
         btn_help.bind(on_release=_show_help)
-        box.add_widget(btn_help)
+        box.add_widget(self._safe_text(btn_help, min_height=dp(44)))
 
         # 熄屏/后台朗读要靠系统「不冻结本应用」——一键跳到省电白名单设置页。
         btn_power = ABPrimaryButton(text="省电白名单（后台不被冻结）",
                                     size_hint_y=None, height=dp(44))
         btn_power.bind(on_release=lambda *_: self._open_power_settings())
-        box.add_widget(btn_power)
+        box.add_widget(self._safe_text(btn_power, min_height=dp(44)))
 
         # 自启动 / 后台运行权限（各 ROM 是隐藏页，这里按包名逐个试跳转）
         btn_auto = ABButton(text="自启动 / 后台权限", size_hint_y=None,
                             height=dp(44))
         btn_auto.bind(on_release=lambda *_: self._open_autostart_settings())
-        box.add_widget(btn_auto)
+        box.add_widget(self._safe_text(btn_auto, min_height=dp(44)))
 
         # 主界面去掉了停止键（播放键改成暂停/继续切换），
         # 停止功能放这里，需要时还能用。
@@ -2160,15 +2363,15 @@ class AudioBookApp(App, WakelockFgMixin):
             self._save_position()
             self._toast("已停止朗读")
         btn_stop.bind(on_release=_do_stop)
-        box.add_widget(btn_stop)
+        box.add_widget(self._safe_text(btn_stop, min_height=dp(44)))
 
         # ---- 历史播放书籍 ----
         btn_hist = ABButton(text="历史播放书籍", size_hint_y=None, height=dp(44))
         btn_hist.bind(on_release=lambda *_: self._open_history_popup(popup))
-        box.add_widget(btn_hist)
+        box.add_widget(self._safe_text(btn_hist, min_height=dp(44)))
 
         # ---- 备份 / 诊断 ----
-        tools_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        tools_row = BoxLayout(size_hint_y=None, spacing=dp(8))
         btn_export = ABButton(text="导出书签/进度", size_hint_x=1,
                               font_size="12sp")
         btn_export.bind(on_release=lambda *_: self._export_backup())
@@ -2178,15 +2381,15 @@ class AudioBookApp(App, WakelockFgMixin):
         btn_share_log = ABButton(text="分享日志", size_hint_x=1,
                                  font_size="12sp")
         btn_share_log.bind(on_release=lambda *_: self._share_diag_log())
-        tools_row.add_widget(btn_export)
-        tools_row.add_widget(btn_export_log)
-        tools_row.add_widget(btn_share_log)
-        box.add_widget(tools_row)
+        tools_row.add_widget(self._safe_text(btn_export, min_height=dp(46)))
+        tools_row.add_widget(self._safe_text(btn_export_log, min_height=dp(46)))
+        tools_row.add_widget(self._safe_text(btn_share_log, min_height=dp(46)))
+        box.add_widget(self._auto_row(tools_row, dp(46)))
 
         btn_close = ABPrimaryButton(text="关闭", size_hint_y=None,
                                     height=dp(46))
         btn_close.bind(on_release=lambda *_: popup.dismiss())
-        box.add_widget(btn_close)
+        box.add_widget(self._safe_text(btn_close, min_height=dp(46)))
         _sv = ScrollView()
         _sv.add_widget(box)
         popup.content = _sv
@@ -2194,17 +2397,21 @@ class AudioBookApp(App, WakelockFgMixin):
 
     def _slider_row(self, title, lo, hi, value, callback, fmt=None):
         """一行「标题 + 滑块 + 当前值」。"""
-        row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        row.add_widget(Label(text=title, size_hint_x=None, width=dp(64), font_size="13sp"))
+        row = BoxLayout(size_hint_y=None, spacing=dp(8))
+        row.add_widget(self._auto_label(title, size_hint_x=None, width=dp(64),
+                                        font_size="13sp", min_height=dp(24)))
         slider = Slider(min=lo, max=hi, value=value)
         shown = fmt(value) if fmt else str(value)
-        value_lbl = Label(text=shown, size_hint_x=None, width=dp(56), font_size="12sp")
+        value_lbl = self._auto_label(shown, size_hint_x=None, width=dp(56),
+                                     font_size="12sp", min_height=dp(24),
+                                     halign="center")
         slider.bind(value=lambda _s, v: (
             setattr(value_lbl, "text", fmt(v) if fmt else str(int(v))),
             callback(v)))
         row.add_widget(slider)
         row.add_widget(value_lbl)
-        return row
+        # 行高跟着标题/数值的实际高度走（写死 dp(40) 时换行出的第二行会被切掉）
+        return self._auto_row(row, dp(46))
 
     def _on_pitch(self, value):
         self._engine.set_pitch(int(value))
@@ -2214,6 +2421,8 @@ class AudioBookApp(App, WakelockFgMixin):
         """把当前主题的颜色刷进 theme_* 属性 —— KV 绑定会传播到全部控件。"""
         t = _THEMES[self.theme]
         self.theme_bg = t["bg"]
+        self.theme_surface = t["surface"]
+        self.theme_border = t["border"]
         self.theme_btn = t["btn"]
         self.theme_primary = t["primary"]
         self.theme_danger = t["danger"]
