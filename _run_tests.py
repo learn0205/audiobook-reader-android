@@ -11,7 +11,6 @@
 import os
 import sys
 import tempfile
-import threading
 import time
 
 os.environ["KIVY_NO_ARGS"] = "1"
@@ -94,14 +93,12 @@ def test_edge_flow():
 
     edge_tts_client.synthesize_to_file = fake_synth
 
+    # ⚠️ 以前这里另起一个线程循环 Clock.tick()，好让「合成完 → 起播」这条
+    #    Clock 投递被处理。但 Clock **不是线程安全的**：子线程 tick() 与合成
+    #    线程的 schedule_once 会互相踩，CI 慢机器上回调整条丢失 → 预取永远不触发
+    #    （`early=1` 偶发失败）。现在桌面端 _post_to_main 是同步直调，不需要
+    #    后台泵时钟；这里只在主线程自己 tick，保持确定性。
     from kivy.clock import Clock
-    stop = threading.Event()
-
-    def ticker():
-        while not stop.is_set():
-            Clock.tick()
-            time.sleep(0.03)
-    threading.Thread(target=ticker, daemon=True).start()
 
     e = tts_engine.EdgeTTS()
     e._cache_dir = tempfile.mkdtemp()
@@ -113,15 +110,16 @@ def test_edge_flow():
     # 等待预取生效：CI 机器慢，固定 sleep 会偶发超时误报 —— 轮询最多等 10 秒
     deadline = time.time() + 10
     while time.time() < deadline and len(calls) < 2:
+        Clock.tick()
         time.sleep(0.05)
     early = len(calls)
     deadline = time.time() + 90
     while time.time() < deadline:
+        Clock.tick()
         e.poll_advance()
         time.sleep(0.02)
         if e.get_state() == STATE_STOPPED and e._index >= total:
             break
-    stop.set()
     cached = sum(1 for _, s in e._sentences
                  if os.path.exists(e._cache_path(s)))
     check("edge: 播放期间预取生效", early >= 2, "early=%d" % early)

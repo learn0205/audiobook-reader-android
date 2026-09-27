@@ -108,11 +108,14 @@ def _post_to_main(fn):
             return
         except Exception:
             pass
-    try:
-        from kivy.clock import Clock
-        Clock.schedule_once(lambda _dt: fn(), 0)
-    except Exception:
-        fn()
+    # ⚠️ 桌面（没 jnius）**不要再退化成 Clock.schedule_once**：
+    #    那是从合成子线程往 Kivy 的 Clock 塞事件，而 Clock **不是线程安全的** ——
+    #    子线程塞事件和主线程 tick() 撞上时，回调整条会被丢掉。桌面端平时看不出来，
+    #    但「合成完 → 起播」和「起播前预取下一句」都走这条投递，丢了就等于预取
+    #    永远不触发（CI 上的表现：`edge: 播放期间预取生效 early=1` 偶发失败）。
+    #    桌面没有安卓主线程约束，直接同步调用即可（_play_file / _on_synth_error
+    #    都不碰图形指令），结果完全确定。
+    fn()
 
 
 # ============================================================================
