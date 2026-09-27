@@ -703,7 +703,7 @@ class AudioBookApp(App, WakelockFgMixin):
                  "打开之后：\n"
                  "· 点正文任意一段  →  从该处开始朗读\n"
                  "· 长按任意一段    →  加书签 / 选段朗读\n"
-                 "· 顶部「目录」    →  按章节跳转朗读\n\n"
+                 "· 顶部「目录」    →  按章节跳转（点 ▶ 才开始念）\n\n"
                  "（第一次打开书籍时会自动弹出提示）",
             halign="center", valign="middle", font_size="14sp",
             pos_hint={"center_x": 0.5, "center_y": 0.5})  # 同 scroll：无 pos_hint 不会被 FloatLayout 摆位
@@ -1208,9 +1208,9 @@ class AudioBookApp(App, WakelockFgMixin):
         popup = Popup(title="怎么用", size_hint=(0.88, None), height=dp(320))
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(14))
         tips = ABDimLabel(
-            text="· 点正文任意一段  →  从该处开始朗读\n\n"
+            text=                 "· 点正文任意一段  →  从该处开始朗读\n\n"
                  "· 长按任意一段    →  加书签 / 选段朗读\n\n"
-                 "· 顶部「目录」    →  按章节跳转朗读\n\n"
+                 "· 顶部「目录」    →  按章节跳转（点 ▶ 才开始念）\n\n"
                  "· 底部进度条      →  拖动跳转任意位置\n\n"
                  "· 底部 ▶          →  播放 / 暂停（熄屏也会继续念）",
             halign="left", valign="top", font_size="13sp")
@@ -1586,6 +1586,8 @@ class AudioBookApp(App, WakelockFgMixin):
         """
         index = max(0, min(int(index), len(self._paragraphs) - 1))
         was_playing = self._engine.get_state() == STATE_PLAYING
+        if was_playing:
+            self._follow = True      # 还在念 → 跳过去后继续让高亮跟着走
         self._engine.seek_paragraph(index)
         self._set_highlight(index)
         self._save_position(persist=True)   # 跳转立刻落盘，杀掉也不丢
@@ -2000,7 +2002,7 @@ class AudioBookApp(App, WakelockFgMixin):
         popup.open()
 
     def goto_chapter_index(self, chapter_index):
-        """目录里点了第 chapter_index 章 → 跳过去并开始朗读。"""
+        """目录里点了第 chapter_index 章 → 跳过去（默认暂停，点 ▶ 才开始念）。"""
         if not self._chapters:
             return
         idx = max(0, min(int(chapter_index), len(self._chapters) - 1))
@@ -2011,11 +2013,8 @@ class AudioBookApp(App, WakelockFgMixin):
             except Exception:
                 pass
             self._chapter_popup = None
-        self._follow = True          # 目录跳章并开始朗读 → 恢复「高亮跟随」
-        self._engine.play(start)
-        self._set_highlight(start)
-        self._save_position(persist=True)   # 目录选章立刻落盘，杀掉也不丢
-        self._toast("从「%s」开始朗读" % title[:18])
+        # 与「上一章/下一章」「书签跳转」同一套规则：只定位，不自动朗读
+        self._seek_to(start, "已跳到「%s」" % title[:18])
 
 
     # ============================================================

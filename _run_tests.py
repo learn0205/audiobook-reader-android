@@ -316,15 +316,26 @@ def test_jump_default_paused():
           pos == 1 and app._engine.get_state() != STATE_PLAYING,
           "pos=%d state=%s" % (pos, app._engine.get_state()))
 
+    # ---- 目录选章同样只定位 ----
+    app.goto_chapter_index(1)
+    Clock.tick()
+    pos = app._engine.get_position()[0]
+    check("jump: 目录选章只定位不朗读",
+          pos == app._chapters[1][1] and app._engine.get_state() != STATE_PLAYING,
+          "pos=%d state=%s" % (pos, app._engine.get_state()))
+
     # ---- 两种状态下都不应该调 play() ----
     calls = []
     orig_play, orig_state = app._engine.play, app._engine.get_state
     try:
         app._engine.play = lambda *a, **k: calls.append(a)
-        app._engine.get_state = lambda: STATE_STOPPED
-        app.jump_chapter(-1)
-        app._engine.get_state = lambda: STATE_PLAYING
-        app.jump_chapter(1)
+        for state in (STATE_STOPPED, STATE_PLAYING):
+            app._engine.get_state = lambda: state
+            app.jump_chapter(-1)
+            app.jump_chapter(1)
+            app.goto_chapter_index(0)
+            app.goto_chapter_index(1)
+            app._goto_bookmark(_FakePopup(), 2)
         check("jump: 跳转不再调用 play()", not calls, "calls=%s" % calls)
     finally:
         app._engine.play = orig_play
