@@ -272,6 +272,65 @@ def test_settings_popup():
         app._stop_tick_loop()
 
 
+def test_jump_default_paused():
+    """上一章/下一章、书签跳转 —— 默认只定位，不自动开始朗读。
+
+    · 没在朗读 → 跳过去后保持暂停（state 仍是 stopped / paused），
+      由用户点底部 ▶ 决定何时开始念；
+    · 正在朗读 → 也不去重调 play()，靠 seek_paragraph 从新位置接着念，
+      不打断正在听的这一段。
+    """
+    import tempfile
+    from tts_android import STATE_PLAYING, STATE_STOPPED
+    from kivy.clock import Clock
+    app = shared_app()
+    root = shared_root()
+    root.size = (400, 800)
+
+    path = os.path.join(tempfile.mkdtemp(), "t.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("第一章 开头\n甲句。乙句。\n丙句。丁句。\n"
+                "第二章 后续\n戊句。己句。\n")
+    app.open_book(path)
+    for _ in range(4):
+        Clock.tick()
+    check("jump: 章节识别正常", len(app._chapters) == 2,
+          "chapters=%s" % (app._chapters,))
+
+    # ---- 静止状态跳章：位置过去，但不自动念 ----
+    app.jump_chapter(1)
+    Clock.tick()
+    pos = app._engine.get_position()[0]
+    check("jump: 下一章只定位不朗读",
+          pos == app._chapters[1][1] and app._engine.get_state() != STATE_PLAYING,
+          "pos=%d state=%s" % (pos, app._engine.get_state()))
+
+    # ---- 书签跳转同样只定位 ----
+    class _FakePopup(object):
+        def dismiss(self):
+            pass
+    app._goto_bookmark(_FakePopup(), 1)
+    Clock.tick()
+    pos = app._engine.get_position()[0]
+    check("jump: 书签跳转只定位不朗读",
+          pos == 1 and app._engine.get_state() != STATE_PLAYING,
+          "pos=%d state=%s" % (pos, app._engine.get_state()))
+
+    # ---- 两种状态下都不应该调 play() ----
+    calls = []
+    orig_play, orig_state = app._engine.play, app._engine.get_state
+    try:
+        app._engine.play = lambda *a, **k: calls.append(a)
+        app._engine.get_state = lambda: STATE_STOPPED
+        app.jump_chapter(-1)
+        app._engine.get_state = lambda: STATE_PLAYING
+        app.jump_chapter(1)
+        check("jump: 跳转不再调用 play()", not calls, "calls=%s" % calls)
+    finally:
+        app._engine.play = orig_play
+        app._engine.get_state = orig_state
+
+
 def main_run():
     # ⚠️ 顺序不能随便调：test_edge_flow 依赖后台线程 tick Clock 的节奏，
     #    前面跑过多 App 实例/频繁 Clock.tick() 会让它偶发 early=1。
@@ -281,6 +340,7 @@ def main_run():
     test_config_backup()
     test_history()
     test_settings_popup()
+    test_jump_default_paused()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 

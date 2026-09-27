@@ -1542,11 +1542,10 @@ class AudioBookApp(App, WakelockFgMixin):
         popup.open()
 
     def _goto_bookmark(self, popup, para):
+        """跳到书签处 —— 同样只定位（默认暂停），点 ▶ 才开始念。"""
         popup.dismiss()
         para = max(0, min(int(para), len(self._paragraphs) - 1))
-        self._engine.play(para)
-        self._set_highlight(para)
-        self._toast("已跳转到书签：第 %d 段" % (para + 1))
+        self._seek_to(para, "已跳转到书签：第 %d 段" % (para + 1))
 
     def toggle_play(self):
         if not self._paragraphs:
@@ -1578,8 +1577,22 @@ class AudioBookApp(App, WakelockFgMixin):
         self._set_highlight(target)
         self._save_position()
 
+    def _seek_to(self, index, tip):
+        """把进度挪到 index —— **默认暂停，不自动开始朗读**。
+
+        · 没在朗读（刚打开书 / 已暂停 / 已停止）→ 只定位并高亮，保持暂停，
+          等用户点底部 ▶ 才开始念（这是「默认暂停」的本意）；
+        · 正在朗读 → seek 会直接从新位置接着念，不打断正在听的这段。
+        """
+        index = max(0, min(int(index), len(self._paragraphs) - 1))
+        was_playing = self._engine.get_state() == STATE_PLAYING
+        self._engine.seek_paragraph(index)
+        self._set_highlight(index)
+        self._save_position(persist=True)   # 跳转立刻落盘，杀掉也不丢
+        self._toast(tip if was_playing else tip + "（点 ▶ 开始朗读）")
+
     def jump_chapter(self, delta):
-        """跳到上一章 / 下一章的开头，并继续朗读。
+        """跳到上一章 / 下一章的开头（默认暂停，点 ▶ 才开始念）。
 
         听书场景里按章跳比按段跳实用得多（一章一百多段，
         按段跳要按上百次才换一章）。
@@ -1596,11 +1609,7 @@ class AudioBookApp(App, WakelockFgMixin):
             self._toast("已经是%s了" % ("第一章" if delta < 0 else "最后一章"))
             return
         title, start = self._chapters[target]
-        self._follow = True          # 跳章并开始朗读 → 恢复「高亮跟随」
-        self._engine.play(start)
-        self._set_highlight(start)
-        self._save_position(persist=True)   # 跳章立刻落盘，杀掉也不丢
-        self._toast("已跳到「%s」" % title[:18])
+        self._seek_to(start, "已跳到「%s」" % title[:18])
 
     def _slider_down(self, _slider, touch):
         if _slider.collide_point(*touch.pos):
