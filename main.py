@@ -1425,6 +1425,19 @@ class AudioBookApp(App, WakelockFgMixin):
             return
         index = max(0, min(self._view_start + int(local_index),
                            len(self._paragraphs) - 1))
+        self._play_from(index)
+
+    def _play_from(self, index):
+        """从**全书**第 index 段开始朗读（入参不许再补 _view_start）。
+
+        ⚠️ 以前长按菜单的「从这里开始朗读」直接调 tap_paragraph()，
+        而它传进去的是已经换算好的全书下标 —— tap_paragraph 又当成章内
+        下标加了一次 _view_start，结果跳到后面章节的某一段（看起来像随机）。
+        现在章内 → 全书的换算只发生在 tap_paragraph 里，朗读统一走这里。
+        """
+        if not self._paragraphs:
+            return
+        index = max(0, min(int(index), len(self._paragraphs) - 1))
         self._follow = True          # 点段落开始朗读 → 恢复「高亮跟随」
         self._engine.play(index)
         self._set_highlight(index)
@@ -1463,8 +1476,10 @@ class AudioBookApp(App, WakelockFgMixin):
             btn.bind(on_release=_run)
             return btn
 
+        # ⚠️ index 已经是全书下标，必须走 _play_from()，不能调 tap_paragraph()
+        #    （那会把入参当章内下标、再加一次 _view_start → 跳到后面的章节）
         box.add_widget(_action("▶ 从这里开始朗读",
-                               lambda: self.tap_paragraph(index)))
+                               lambda: self._play_from(index)))
         if has_bookmark:
             box.add_widget(_action("× 删除此处书签",
                                    lambda: self.remove_bookmark(index),

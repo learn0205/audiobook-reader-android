@@ -354,6 +354,64 @@ def test_jump_default_paused():
         app._engine.get_state = orig_state
 
 
+def test_long_press_play_index():
+    """长按菜单「从这里开始朗读」必须读**长按的那一段**。
+
+    ParaView 只渲染当前章节，它给的 index 是**章内**下标；长按菜单里已经
+    换算成全书下标了。以前这句写的是 tap_paragraph(index)，等于把全书下标
+    又当成章内下标加了一次 _view_start —— 表现就是「跳到后面章节的随机一段」。
+    """
+    import tempfile
+    from kivy.clock import Clock
+    from kivy.core.window import Window
+    from kivy.uix.popup import Popup
+    app = shared_app()
+    root = shared_root()
+    root.size = (400, 800)
+
+    path = os.path.join(tempfile.mkdtemp(), "t.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("第一章 开头\n甲句。乙句。\n丙句。丁句。\n"
+                "第二章 后续\n戊句。己句。\n庚句。辛句。\n")
+    app.open_book(path)
+    for _ in range(4):
+        Clock.tick()
+
+    # 切到第二章并等正文重建（_view_start 变成第二章的起始段）
+    app.goto_chapter_index(1)
+    for _ in range(6):
+        Clock.tick()
+    view_start = app._view_start
+    if view_start == 0:
+        check("longpress: 视图已切到第二章", False, "view_start=0")
+        return
+
+    played = []
+    app._engine.play = lambda i, *a, **k: played.append(i)
+    # 长按第二章里的第 1 段（章内下标 = 1）
+    app.long_press_paragraph(1)
+    popup = None
+    for w in Window.children:
+        if isinstance(w, Popup) and w.title.startswith("第"):
+            popup = w
+            break
+    if popup is None:
+        check("longpress: 长按菜单弹出", False)
+        return
+    # 菜单第一个按钮就是「▶ 从这里开始朗读」
+    btns = [w for w in _walk(popup) if getattr(w, "text", "").startswith("▶ 从")]
+    if not btns:
+        check("longpress: 找到「从这里开始朗读」按钮", False)
+        return
+    btns[0].dispatch("on_release")
+    Clock.tick()
+    want = view_start + 1          # 长按的那一段（全书下标）
+    check("longpress: 从长按的段落开始（不再多加 _view_start）",
+          played == [want], "played=%s want=[%d] view_start=%d"
+          % (played, want, view_start))
+    popup.dismiss()
+
+
 def main_run():
     # ⚠️ 顺序不能随便调：test_edge_flow 依赖后台线程 tick Clock 的节奏，
     #    前面跑过多 App 实例/频繁 Clock.tick() 会让它偶发 early=1。
@@ -364,6 +422,7 @@ def main_run():
     test_history()
     test_settings_popup()
     test_jump_default_paused()
+    test_long_press_play_index()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 
