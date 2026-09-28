@@ -2184,6 +2184,17 @@ class AudioBookApp(App, WakelockFgMixin):
 
         # 自检信息：无 adb 时让用户截图即可定位（装的是哪版 / 推进是否在跑 / 唤醒锁是否生效）
         _eng_state = self._engine.get_state() if self._engine is not None else "-"
+        # 卡死计时：播放态但位置停滞后，这里能看到「tick 仍在涨，但引擎卡在 playing」，
+        # 直接区分「推进链路活着 / 引擎(合成)卡住」—— 这正是定位卡死所需的两个数据点之一。
+        try:
+            if _eng_state == "playing" and self._frozen_since_tick is not None:
+                _stall = self._tick_count - self._frozen_since_tick
+                _eng_extra = "  卡死计时%d/%d" % (min(_stall, self._freeze_ticks),
+                                                  self._freeze_ticks)
+            else:
+                _eng_extra = ""
+        except Exception:
+            _eng_extra = ""
         try:
             _utter_ok = ("已挂" if self._engine.utter_listener_ok()
                          else "未挂（用轮询推进）")
@@ -2247,7 +2258,7 @@ class AudioBookApp(App, WakelockFgMixin):
             "监听器 %s   媒体控制 %s\n"
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
-            "引擎 %s\n"
+            "引擎 %s%s\n"
             "正文 %s\n"
             "记忆 书=%s  断点=%s\n"
             "崩溃 %s\n"
@@ -2261,7 +2272,7 @@ class AudioBookApp(App, WakelockFgMixin):
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",
                ("  " + self._fg_error) if self._fg_error else "",
-               _eng_state, _layout,
+               _eng_state, _eng_extra, _layout,
                _book, _pos_s,
                (_crash_last or "无"),
                (str(self._last_error)[:120] or "无"))
