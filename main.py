@@ -1856,8 +1856,17 @@ class AudioBookApp(App, WakelockFgMixin):
             # 用引擎的插值位置刷新进度条：否则它只在每读完一句时跳一格
             _para, char_now, total_chars = self._engine.get_position()
             self._on_progress(char_now, total_chars)
-            # 卡死自检：播放态但位置长时间不动 → 自动暂停并刷新媒体通知
-            self._check_playback_freeze(_para, char_now)
+            # 卡死自检：播放态但位置长时间不动 → 自动恢复/暂停并刷新媒体通知。
+            # 播放器的真实媒体位置（毫秒）也并入判定：Edge 的 (段,字符) 整句
+            # 播放期间是恒定的，长句会被误判；媒体位置在真出声时持续前进。
+            _mpos = -1
+            try:
+                _playing, _mpos = self._engine.media_position()
+                if not _playing:
+                    _mpos = -1
+            except Exception:
+                pass
+            self._check_playback_freeze(_para, char_now, _mpos)
         if self._sleep_until > 0:
             left = self._sleep_until - time.time()
             if left <= 0:
@@ -1869,20 +1878,24 @@ class AudioBookApp(App, WakelockFgMixin):
                 self.sleep_text = "剩余 %02d:%02d" % divmod(int(left), 60)
         return True
 
-    def _check_playback_freeze(self, para, char):
-        """卡死自检：播放态下位置长时间不动（引擎仍报 PLAYING、_tick 兜底也没
-        催出新句子），说明朗读实际已卡死（上一轮反馈的「播放一段时间卡死」）。
+    def _check_playback_freeze(self, para, char, media_pos=-1):
+        """卡死自检：播放态下位置长时间不动 → 自动恢复（重开当前句）。
 
-        一旦判定卡死就自动 pause() —— 这会触发 _on_state(PAUSED)，进而把通知栏
-        那张「正在朗读」的媒体卡片刷新成「已暂停」并设为可清除，不再一直挂着。
+        ⚠️ 位置信号有三层，缺一就会误判（每一层都对应一次真实的误暂停）：
+          1. is_busy() —— Edge 在后台子线程合成 mp3（弱网可达十几秒），
+             期间位置不动属正常等待，直接清零计时；
+          2. media_pos（MediaPlayer.getCurrentPosition 毫秒）—— Edge 的
+             (段,字符) 只在句尾推进时才跳，**整句播放期间恒定**，长句
+             （1.1x 语速下 >12 秒，约 55+ 字）会被误判卡死。真出声时
+             媒体位置毫秒级持续前进，把它并入判定键后播放阶段不再误判；
+          3. (段,字符) —— 播放器没在播（播完了等回调 / ROM 级卡死）时，
+             用它兜底计时。
 
-        ⚠️ 关键修正：Edge 是在**后台子线程**合成 mp3 的，一句合成（弱网/抖动）
-        可能要十几秒甚至更久；这段时间里位置自然不动，但属于「正常等待」，
-        不是卡死。用 is_busy() 把「正在合成」排除掉——否则每句稍慢就把用户
-        的播放切到暂停（「播放一段时间后仍然会暂停」的真凶）。只有真正既没在
-        合成、也没在播、位置还不动，才算卡死。
+        判定卡死后不再直接「自动暂停」（用户得手动点 ▶），而是调
+        engine.recover() 把当前句的合成/播放链路整条重开（无感重试），
+        恢复失败才退回暂停。
         """
-        # 引擎正在后台合成当前句（慢网络/抖动）→ 不算卡死，清掉计时重新算
+        # 第一层：正在合成当前句（慢网络/抖动）→ 不算卡死，清掉计时重新算
         try:
             if self._engine.is_busy():
                 self._frozen_last = None
@@ -1890,7 +1903,8 @@ class AudioBookApp(App, WakelockFgMixin):
                 return
         except Exception:
             pass
-        key = (para, char)
+        # 播放器报「正在播」时，用媒体位置参与判定（第三层兜底不适用）
+        key = (para, char, media_pos)
         if self._frozen_last != key:
             self._frozen_last = key
             self._frozen_since_tick = self._tick_count
@@ -1900,11 +1914,17 @@ class AudioBookApp(App, WakelockFgMixin):
             return
         if self._tick_count - self._frozen_since_tick >= self._freeze_ticks:
             self._frozen_since_tick = None
+            self._frozen_last = None
             try:
-                self._engine.pause()
-                self._toast("播放似乎卡住，已自动暂停（点 ▶ 继续）")
+                # 自动恢复：当前句合成/播放链路整条重开（无感重试）
+                self._engine.recover()
+                self._toast("检测到播放卡顿，已自动恢复")
             except Exception:
-                pass
+                try:
+                    self._engine.pause()
+                    self._toast("播放似乎卡住，已自动暂停（点 ▶ 继续）")
+                except Exception:
+                    pass
 
     # ============================================================
     #  朗读推进兜底时钟：独立于 Kivy 逐帧时钟（熄屏也能跑）

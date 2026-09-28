@@ -195,6 +195,39 @@ class EdgeTTS:
         """
         return bool(self._synthesizing)
 
+    def media_position(self):
+        """播放器的真实媒体位置（毫秒）。
+
+        ⚠️ 卡死自检的第二个信号源：Edge 的 get_position() 里的 char_pos
+        **整句播放期间是恒定的**（只在句尾推进时跳一格），长句朗读超过
+        卡死阈值就会被误判「卡死」。而 MediaPlayer.getCurrentPosition()
+        在真正出声时是毫秒级持续前进的——把它并入卡死判定键后：
+          · 播放器真在播、位置在走 → 永不误判；
+          · 播放器报 playing 但位置冻结（ROM 级卡死）→ 仍能被检出。
+        返回 (是否正在播, 毫秒)；桌面 / 无播放器返回 (False, -1)。
+        """
+        if not _JNIUS_OK or self._player is None:
+            return False, -1
+        try:
+            return (bool(self._player.isPlaying()),
+                    int(self._player.getCurrentPosition()))
+        except Exception:
+            return False, -1
+
+    def recover(self):
+        """卡死自恢复：不动用断点/不切换状态，把当前句整条链路重开一遍。
+
+        与「自动暂停」相比体验好得多：合成线程、播放器全部弃旧换新，
+        相当于无感重试当前句；只有 recover 本身抛异常才退回暂停。
+        """
+        if self._state != STATE_PLAYING:
+            return
+        self._generation += 1
+        self._synthesizing = False
+        self._stop_player()
+        self._set_state(STATE_PLAYING)      # 状态不变，仅触发通知刷新兜底
+        self._speak_current()
+
     def get_cps(self):
         return self._cps
 
@@ -757,6 +790,23 @@ class ReaderTTS:
     def is_busy(self):
         """透传当前活跃后端的「合成中」状态（供 main.py 卡死自检区分慢网络与真死锁）。"""
         return self._backend().is_busy()
+
+    def media_position(self):
+        """透传播放器真实媒体位置 (是否在播, 毫秒)；后端不支持时返回 (False, -1)。"""
+        be = self._backend()
+        fn = getattr(be, "media_position", None)
+        return fn() if fn is not None else (False, -1)
+
+    def recover(self):
+        """卡死自恢复：让当前活跃后端把当前句整条链路重开（无感重试）。"""
+        be = self._backend()
+        fn = getattr(be, "recover", None)
+        if fn is not None:
+            fn()
+        else:
+            # 系统引擎没有专用 recover：从当前段重播（等价于无感重试）
+            para, _c, _t = be.get_position()
+            be.play(para)
 
     def utter_listener_ok(self):
         """进度监听器是否成功挂上（AndroidTTS 专有；自检显示用）。"""
