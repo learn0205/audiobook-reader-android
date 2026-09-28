@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
+import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
@@ -82,6 +83,16 @@ public class MediaControls {
                         | PlaybackState.ACTION_SKIP_TO_PREVIOUS)
                 .setState(state, 0, playing ? 1.0f : 0.0f)
                 .build());
+
+        // 媒体元数据：让锁屏 / 通知栏的媒体卡片显示书名，而不是泛化的占位文案
+        // （不设置时部分机型/锁屏会显示成 "playback" 一类的通用标签）。
+        try {
+            MediaMetadata.Builder mb = new MediaMetadata.Builder();
+            mb.putString(MediaMetadata.METADATA_KEY_TITLE,
+                    sTitle.isEmpty() ? "有声书朗读" : sTitle);
+            mb.putString(MediaMetadata.METADATA_KEY_ARTIST, "有声书朗读");
+            sSession.setMetadata(mb.build());
+        } catch (Exception ignore) { }
 
         NotificationManager nm = (NotificationManager)
                 ctx.getSystemService(Context.NOTIFICATION_SERVICE);

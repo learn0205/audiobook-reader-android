@@ -485,6 +485,10 @@ class AudioBookApp(App, WakelockFgMixin):
         self._media_cb = None
         self._media_error = ""
         self._is_playing = False
+        # ---- 卡死自检：播放态但长时间无推进 → 自动暂停并刷新媒体通知 ----
+        self._frozen_last = None          # 最近一次 (段, 字符) 推进位置
+        self._frozen_since_tick = None    # 位置停止变化起算的 _tick 序号
+        self._freeze_ticks = 60           # 0.2s × 60 ≈ 12s 无推进视为卡死
 
     # ============================================================
     #                        启动
@@ -1763,6 +1767,9 @@ class AudioBookApp(App, WakelockFgMixin):
             self._start_fg_service()
             self._media_setup()
             self._media_update(True)
+            # 重新进入播放态：清零卡死计速，避免把「开头合成等待」误判为卡死
+            self._frozen_last = None
+            self._frozen_since_tick = None
         else:
             self._media_update(False)
             self._release_wake()
@@ -1835,6 +1842,8 @@ class AudioBookApp(App, WakelockFgMixin):
             # 用引擎的插值位置刷新进度条：否则它只在每读完一句时跳一格
             _para, char_now, total_chars = self._engine.get_position()
             self._on_progress(char_now, total_chars)
+            # 卡死自检：播放态但位置长时间不动 → 自动暂停并刷新媒体通知
+            self._check_playback_freeze(_para, char_now)
         if self._sleep_until > 0:
             left = self._sleep_until - time.time()
             if left <= 0:
@@ -1845,6 +1854,29 @@ class AudioBookApp(App, WakelockFgMixin):
             else:
                 self.sleep_text = "剩余 %02d:%02d" % divmod(int(left), 60)
         return True
+
+    def _check_playback_freeze(self, para, char):
+        """卡死自检：播放态下位置长时间不动（引擎仍报 PLAYING、_tick 兜底也没
+        催出新句子），说明朗读实际已卡死（上一轮反馈的「播放一段时间卡死」）。
+
+        一旦判定卡死就自动 pause() —— 这会触发 _on_state(PAUSED)，进而把通知栏
+        那张「正在朗读」的媒体卡片刷新成「已暂停」并设为可清除，不再一直挂着。
+        """
+        key = (para, char)
+        if self._frozen_last != key:
+            self._frozen_last = key
+            self._frozen_since_tick = self._tick_count
+            return
+        if self._frozen_since_tick is None:
+            self._frozen_since_tick = self._tick_count
+            return
+        if self._tick_count - self._frozen_since_tick >= self._freeze_ticks:
+            self._frozen_since_tick = None
+            try:
+                self._engine.pause()
+                self._toast("播放似乎卡住，已自动暂停（点 ▶ 继续）")
+            except Exception:
+                pass
 
     # ============================================================
     #  朗读推进兜底时钟：独立于 Kivy 逐帧时钟（熄屏也能跑）
