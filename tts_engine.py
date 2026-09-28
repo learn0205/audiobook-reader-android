@@ -186,6 +186,15 @@ class EdgeTTS:
     def get_state(self):
         return self._state
 
+    def is_busy(self):
+        """是否在后台合成当前句（网络 IO 进行中）。
+
+        卡死自检靠它区分两类「位置不动」：
+          · True  → 正在等 Edge 返回 mp3（慢网络/抖动），是正常等待，不该判卡死；
+          · False → 既没在合成也没在播，位置还不动 → 才是真卡死，应自动暂停恢复。
+        """
+        return bool(self._synthesizing)
+
     def get_cps(self):
         return self._cps
 
@@ -723,6 +732,10 @@ class ReaderTTS:
 
     def get_state(self):
         return self._backend().get_state()
+
+    def is_busy(self):
+        """透传当前活跃后端的「合成中」状态（供 main.py 卡死自检区分慢网络与真死锁）。"""
+        return self._backend().is_busy()
 
     def utter_listener_ok(self):
         """进度监听器是否成功挂上（AndroidTTS 专有；自检显示用）。"""

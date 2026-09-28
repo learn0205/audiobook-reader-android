@@ -307,6 +307,15 @@ class AndroidTTS:
         """当前播放状态：stopped / playing / paused。"""
         return self._state
 
+    def is_busy(self):
+        """系统引擎是否正在合成/朗读中（用于卡死自检区分慢网络与真死锁）。
+
+        系统 TTS 的 speak() 是同步递交给系统服务、靠 onDone 回调推进，
+        没有「后台子线程在飞」的状态，因此这里恒为 False——系统引擎的
+        卡死（如某些机型 onDone 不触发）仍由 main.py 的卡死自检兜底恢复。
+        """
+        return False
+
     def get_cps(self):
         """实测朗读速度（倍速 1.0 下每秒字数），用于估算总时长。
 

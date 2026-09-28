@@ -1875,7 +1875,21 @@ class AudioBookApp(App, WakelockFgMixin):
 
         一旦判定卡死就自动 pause() —— 这会触发 _on_state(PAUSED)，进而把通知栏
         那张「正在朗读」的媒体卡片刷新成「已暂停」并设为可清除，不再一直挂着。
+
+        ⚠️ 关键修正：Edge 是在**后台子线程**合成 mp3 的，一句合成（弱网/抖动）
+        可能要十几秒甚至更久；这段时间里位置自然不动，但属于「正常等待」，
+        不是卡死。用 is_busy() 把「正在合成」排除掉——否则每句稍慢就把用户
+        的播放切到暂停（「播放一段时间后仍然会暂停」的真凶）。只有真正既没在
+        合成、也没在播、位置还不动，才算卡死。
         """
+        # 引擎正在后台合成当前句（慢网络/抖动）→ 不算卡死，清掉计时重新算
+        try:
+            if self._engine.is_busy():
+                self._frozen_last = None
+                self._frozen_since_tick = None
+                return
+        except Exception:
+            pass
         key = (para, char)
         if self._frozen_last != key:
             self._frozen_last = key
@@ -2068,12 +2082,12 @@ class AudioBookApp(App, WakelockFgMixin):
         popup.bind(on_dismiss=lambda *_: setattr(self, "_chapter_rv", None))
 
         def _scroll_to_cur(_dt):
-            # 弹窗布局完成后再滚，确保 RecycleView 已算好尺寸
-            if self._chapter_rv is rv and cur >= 0:
-                try:
-                    rv.scroll_to_index(cur)
-                except Exception:
-                    pass
+            # 弹窗布局完成后再滚，确保 RecycleView 已算好尺寸；
+            # 尺寸还没就绪（首帧 height 仍为 0）就下一帧再试。
+            if self._chapter_rv is not rv or cur < 0:
+                return
+            if not self._toc_scroll_to_top(rv, cur):
+                Clock.schedule_once(_scroll_to_cur, 0)
         popup.open()
         Clock.schedule_once(_scroll_to_cur, 0)
 
@@ -2092,11 +2106,42 @@ class AudioBookApp(App, WakelockFgMixin):
         # 与「上一章/下一章」「书签跳转」同一套规则：只定位，不自动朗读
         self._seek_to(start, "已跳到「%s」" % title[:18])
 
+    def _toc_scroll_to_top(self, rv, cur):
+        """把目录滚动到「第 cur 章位于列表最顶部」。
+
+        固定行高（dp(46)+间距 dp(2)）下，scroll_y 与内容偏移是线性映射：
+        scroll_y=1 显示第 0 章（顶部），scroll_y=0 显示末章（底部）。要让第 cur
+        章顶格，需 scroll_y = 1 - cur*行高/(内容高-视口高)。比 scroll_to_index
+        （只保证可见、常把目标停在视口底部）更符合「当前章在最上面」的预期。
+
+        返回 True 表示已滚动（或无需滚动）；返回 False 表示尺寸未就绪，调用方
+        应下一帧重试。
+        """
+        try:
+            line_h = dp(46) + dp(2)
+            n = len(self._chapters)
+            if n <= 0 or cur < 0 or cur >= n:
+                return True
+            content_h = n * line_h
+            view_h = rv.height
+            if view_h <= 0:
+                return False          # 还没布局好
+            if content_h <= view_h:
+                rv.scroll_y = 1.0     # 全装得下，直接置顶
+            else:
+                top_off = cur * line_h
+                max_off = content_h - view_h
+                rv.scroll_y = 1.0 - min(top_off, max_off) / max_off
+            return True
+        except Exception:
+            return True
+
     def _toc_mark_current(self, cur):
         """目录弹窗开着时，把高亮与滚动位置同步到当前章（播放换章后实时跟随）。
 
         只在章节真正切换时调用（见 _refresh_view），不会每读一段都触发，
-        因此不会和用户在目录里的手动滚动打架。
+        因此不会和用户在目录里的手动滚动打架。换章时把当前章顶格到列表最上方，
+        与「打开目录即定位到当前章」行为一致。
         """
         rv = self._chapter_rv
         if rv is None or cur < 0 or cur >= len(self._chapters):
@@ -2104,10 +2149,7 @@ class AudioBookApp(App, WakelockFgMixin):
         for i, item in enumerate(rv.data):
             item["current"] = (i == cur)
         rv.refresh_from_data()
-        try:
-            rv.scroll_to_index(cur)
-        except Exception:
-            pass
+        self._toc_scroll_to_top(rv, cur)
 
 
     # ============================================================
