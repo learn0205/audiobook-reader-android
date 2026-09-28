@@ -243,8 +243,18 @@ KV = """
     text_size: self.width - dp(20), None
     padding_x: dp(10)
     font_size: '13sp'
-    color: app.theme_text
-    background_color: app.theme_btn
+    # background_normal='' 让按钮不画默认 9-patch，底色改由 canvas.before 自绘，
+    # 这样「当前章」高亮（primary 填充）才不会被默认背景盖住。
+    background_normal: ''
+    background_color: (0, 0, 0, 0)
+    color: (1, 1, 1, 1) if root.current else app.theme_text
+    canvas.before:
+        Color:
+            rgba: app.theme_primary if root.current else app.theme_btn
+        RoundedRectangle:
+            pos: self.x + dp(2), self.y + dp(1)
+            size: self.width - dp(4), self.height - dp(2)
+            radius: [dp(6)]
 
 <ParaView>:
     # 一段正文：点一下就从这段开始读；朗读中的那一段有底色。
@@ -406,6 +416,7 @@ class ChapterRow(RecycleDataViewBehavior, Button):
     """
 
     index = NumericProperty(0)      # 第几章
+    current = BooleanProperty(False) # 是否为「当前正在读/播」的章（打开目录时高亮）
 
     def on_release(self):
         app = App.get_running_app()
@@ -457,6 +468,7 @@ class AudioBookApp(App, WakelockFgMixin):
         self._view_chapter = -1     # 当前渲染的是第几章（-1 = 未渲染）
         self._view_start = 0        # 当前渲染的首段在全书中的下标
         self._chapter_popup = None  # 章节目录弹窗（点行后要关掉它）
+        self._chapter_rv = None     # 章节目录的 RecycleView（打开时跟随当前章用）
         self._status_popup = None
         self._voice_list = []       # 系统音色列表（引擎初始化后填充）
         self._shown_errors = set()  # 已提示过的错误，避免连续失败时刷屏
@@ -1270,6 +1282,8 @@ class AudioBookApp(App, WakelockFgMixin):
 
         self._view_chapter = ci
         self._view_start = cstart
+        # 目录弹窗开着时，让高亮/滚动实时跟随当前章
+        self._toc_mark_current(ci)
         self.chapter_text = ctitle or ""
         self._text_box.clear_widgets()
         for g in range(cstart, cend + 1):
@@ -2040,14 +2054,28 @@ class AudioBookApp(App, WakelockFgMixin):
         #   layout_manager 还是 None，值被静默丢弃 → viewclass 变 None
         #   → 一行都渲染不出来（这就是「内容不显示」的真凶）。
         rv.viewclass = "ChapterRow"
-        rv.data = [{"text": "%s    (第 %d 段)" % (t, s + 1), "index": i}
+        # 「选择后跟随」：打开目录时自动高亮并定位到当前正在读/播的章节
+        cur = self._view_chapter
+        rv.data = [{"text": "%s    (第 %d 段)" % (t, s + 1),
+                    "index": i, "current": (i == cur)}
                    for i, (t, s) in enumerate(self._chapters)]
 
         box = BoxLayout(orientation="vertical")
         box.add_widget(rv)
         popup.content = box
         self._chapter_popup = popup
+        self._chapter_rv = rv
+        popup.bind(on_dismiss=lambda *_: setattr(self, "_chapter_rv", None))
+
+        def _scroll_to_cur(_dt):
+            # 弹窗布局完成后再滚，确保 RecycleView 已算好尺寸
+            if self._chapter_rv is rv and cur >= 0:
+                try:
+                    rv.scroll_to_index(cur)
+                except Exception:
+                    pass
         popup.open()
+        Clock.schedule_once(_scroll_to_cur, 0)
 
     def goto_chapter_index(self, chapter_index):
         """目录里点了第 chapter_index 章 → 跳过去（默认暂停，点 ▶ 才开始念）。"""
@@ -2063,6 +2091,23 @@ class AudioBookApp(App, WakelockFgMixin):
             self._chapter_popup = None
         # 与「上一章/下一章」「书签跳转」同一套规则：只定位，不自动朗读
         self._seek_to(start, "已跳到「%s」" % title[:18])
+
+    def _toc_mark_current(self, cur):
+        """目录弹窗开着时，把高亮与滚动位置同步到当前章（播放换章后实时跟随）。
+
+        只在章节真正切换时调用（见 _refresh_view），不会每读一段都触发，
+        因此不会和用户在目录里的手动滚动打架。
+        """
+        rv = self._chapter_rv
+        if rv is None or cur < 0 or cur >= len(self._chapters):
+            return
+        for i, item in enumerate(rv.data):
+            item["current"] = (i == cur)
+        rv.refresh_from_data()
+        try:
+            rv.scroll_to_index(cur)
+        except Exception:
+            pass
 
 
     # ============================================================

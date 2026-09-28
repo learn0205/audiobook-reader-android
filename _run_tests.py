@@ -412,6 +412,51 @@ def test_long_press_play_index():
     popup.dismiss()
 
 
+def test_toc_follow():
+    """目录「选择后跟随」：打开时高亮并定位到当前正在读/播的章节，
+    且播放换章时实时跟随。
+
+    1) show_chapters 打开后，data 里只有当前章 `current=True`；
+    2) 章节切换后 _toc_mark_current 能把高亮/跟随切到新章；
+    3) 弹窗关闭后 _chapter_rv 必须清空，避免后续误跟随。
+    """
+    from kivy.clock import Clock
+    from kivy.core.window import Window
+    app = shared_app()
+    root = shared_root()
+    root.size = (400, 800)
+    Window.size = (400, 800)
+    Window.dispatch("on_resize", *Window.size)
+
+    # 造一份假章节表，并把「当前章」设成第 6 章
+    app._chapters = [("第%d章" % i, i * 5) for i in range(20)]
+    app._view_chapter = 6
+
+    try:
+        app.show_chapters()
+        rv = app._chapter_rv
+        check("toc_follow: 打开目录后持有 RecycleView", rv is not None)
+        if rv is not None:
+            cur_flags = [d.get("current") for d in rv.data]
+            check("toc_follow: 仅当前章(6)被高亮",
+                  cur_flags.count(True) == 1 and cur_flags[6] is True,
+                  "flags=%s" % cur_flags)
+            # 模拟播放换章到第 12 章 → 高亮/跟随应切过去
+            app._toc_mark_current(12)
+            cur_flags = [d.get("current") for d in rv.data]
+            check("toc_follow: 换章后跟随到新章(12)",
+                  cur_flags.count(True) == 1 and cur_flags[12] is True
+                  and cur_flags[6] is False,
+                  "flags=%s" % cur_flags)
+        if app._chapter_popup is not None:
+            app._chapter_popup.dismiss()
+        check("toc_follow: 弹窗关闭后清空 _chapter_rv", app._chapter_rv is None)
+    finally:
+        app._chapters = []
+        app._view_chapter = -1
+        app._stop_tick_loop()
+
+
 def main_run():
     # ⚠️ 顺序不能随便调：test_edge_flow 依赖后台线程 tick Clock 的节奏，
     #    前面跑过多 App 实例/频繁 Clock.tick() 会让它偶发 early=1。
@@ -423,6 +468,7 @@ def main_run():
     test_settings_popup()
     test_jump_default_paused()
     test_long_press_play_index()
+    test_toc_follow()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 
