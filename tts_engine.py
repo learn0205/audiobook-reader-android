@@ -389,6 +389,12 @@ class EdgeTTS:
         self._synth_thread = threading.Thread(
             target=self._synthesize_and_play, args=args, daemon=True)
         self._synth_thread.start()
+        # 提前预取：当前句还没合成就先在后台合成后面几句（各自独立连接并行），
+        # 比「等本句开始播放才预取」早了一个合成周期，避免短句快播时下一句来不及
+        # 合成而现场等待——这是 Edge 在线语音「偶尔较长间隔」的主要原因。
+        # 用 self._index（当前句）作基准；generation 变化会自行停止旧的预取。
+        threading.Thread(target=self._prefetch_ahead,
+                         args=(self._index, gen), daemon=True).start()
 
     def _synth_params(self):
         """把 app 的 speed/pitch 档位换算成 Edge 的 rate/pitch/volume 字符串。"""
@@ -447,10 +453,8 @@ class EdgeTTS:
         if generation != self._generation:
             return
         self._stop_player()
-        # 本句 mp3 已完整落盘，起播前就开预取（不会与当前播放抢网络）；
-        # 桌面无播放器的逻辑测试同样走这条路径。
-        threading.Thread(target=self._prefetch_ahead,
-                         args=(self._index, generation), daemon=True).start()
+        # 预取已在 _speak_current（当前句一开始合成）时启动，这里不再重复触发；
+        # 真正起播时若发现后面某句仍没缓存，推进时还有兜底合成（_synth_text_for）。
         if not _JNIUS_OK:
             # 桌面环境无播放器，直接按预估时长推进（仅用于逻辑测试）
             self._synthesizing = False
@@ -531,16 +535,41 @@ class EdgeTTS:
         self._complete_current()
 
     def _prefetch_ahead(self, sent_index, generation):
-        """播放当前句期间，后台预合成接下来的 2 句。
+        """当前句还在合成/播放时，后台并行预合成后面的若干句。
 
         Edge 是逐句合成 mp3：以前播完本句才发现下一句要**现合成**，
-        一次网络往返（0.3~2s）全部变成了标点后的静音 —— 这就是
-        「某些符号（。！？…；切分点）后停顿特别长」的大头。
-        预取后推进时基本命中缓存。任何异常都直接放弃本次预取
-        （网络抖动不该刷屏，推进时还有兜底合成）。"""
+        一次网络往返（握手 + 合成 0.5~3s）全部变成了停顿 —— 这就是
+        「Edge 在线语音偶尔较长间隔」的大头。预取命中后推进直接播本地
+        缓存 mp3，完全不走网络、无握手开销，间隔即消失。
+
+        改进点（与早期版本相比）：
+          · 触发时机提前到 _speak_current（当前句一开始合成就并行预取），
+            比「本句开始播放才预取」早了一个合成周期，短句快播也能命中；
+          · 深度 1→3，且**每句独立线程并行**合成（而非串行等上一句跑完），
+            避免「+1 慢 → +2/+3 全被拖慢」；
+          · 单句失败只放弃该句（不再整批 return），其他句照常预取。
+
+        任何异常都直接放弃该句（网络抖动不该刷屏，推进时还有兜底合成）。
+        """
         if not (self._cache_dir and self._voice_name):
             return
-        for k in (1, 2):
+
+        def _one(idx, sentence, path, key):
+            try:
+                import edge_tts_client
+                if generation != self._generation:
+                    return
+                text, rate, pitch, volume = self._synth_text_for(sentence)
+                edge_tts_client.synthesize_to_file(
+                    text, self._voice_name, path,
+                    rate=rate, pitch=pitch, volume=volume)
+                self._prune_cache(keep_path=path)
+            except Exception:
+                pass
+            finally:
+                self._prefetch_inflight.discard(key)
+
+        for k in (1, 2, 3):
             if generation != self._generation:
                 return
             idx = sent_index + k
@@ -556,17 +585,9 @@ class EdgeTTS:
             if key in self._prefetch_inflight:
                 continue
             self._prefetch_inflight.add(key)
-            try:
-                import edge_tts_client
-                text, rate, pitch, volume = self._synth_text_for(sentence)
-                edge_tts_client.synthesize_to_file(
-                    text, self._voice_name, path,
-                    rate=rate, pitch=pitch, volume=volume)
-                self._prune_cache(keep_path=path)
-            except Exception:
-                return
-            finally:
-                self._prefetch_inflight.discard(key)
+            # 每句一个线程并行预取（各自独立 WS 连接，互不阻塞）
+            threading.Thread(
+                target=_one, args=(idx, sentence, path, key), daemon=True).start()
 
     def _stop_player(self):
         if self._player is not None:

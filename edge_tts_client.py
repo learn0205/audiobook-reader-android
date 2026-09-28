@@ -395,106 +395,175 @@ def _build_messages(voice, text, rate, pitch, volume):
     return config, ssml
 
 
+class _Session:
+    """复用的 Edge WebSocket 会话：握手一次，连续合成多句。
+
+    收益：每句合成原本都要新建 TCP + TLS + WebSocket 握手（约 0.5~1.5s），
+    听书是逐句合成的，这部分固定开销会直接变成句间停顿。复用连接后，
+    只有第一句有握手成本，后续句只是「发 ssml → 收 audio」的网络往返
+    （约 0.3~0.9s），句间间隔大幅缩短。
+
+    自愈与回退：
+      · 连接空闲一段后服务端会断开；下次 synth 读到空/异常 → 标记 dead，
+        synthesize() 外层丢弃并重建连接（退回「每句新建连接」的原行为），
+        所以复用失败不会比之前更差，只是少了优化；
+      · 1 次 WS 握手只带一个 5 分钟窗口的 GEC 令牌；已建立的连接不受令牌
+        轮换影响（GEC 只在握手 URL 上），可安全跨窗口复用；
+      · 401/403（本地时钟不准）会让握手抛错，synthesize() 重试时按服务器时间
+        校正 _CLOCK_SKEW 后重建成功（逻辑与原先一致）。
+
+    线程模型：每条调用线程各自维护一个会话（threading.local），预取线程
+    与「当前句合成线程」互不干扰，天然线程安全。
+    """
+
+    def __init__(self, timeout=40):
+        self.dead = False
+        self.error_stage = "init"
+        self._timeout = timeout
+        self.ssock = None
+        self.use_deflate = False
+        self.comp = None
+        self.decomp = None
+        self._open()
+
+    def _open(self):
+        self.error_stage = "ssl"
+        ctx = _make_ssl_context()      # 安卓上必须显式带上 CA（见 _make_ssl_context）
+        self.error_stage = "connect"
+        sock = socket.create_connection((_WS_HOST, _WS_PORT), timeout=self._timeout)
+        self.error_stage = "tls"
+        ssock = ctx.wrap_socket(sock, server_hostname=_WS_HOST)
+        self.error_stage = "handshake"
+        use_deflate = _ws_handshake(ssock, str(uuid.uuid4()))
+        # 仅当服务端确实协商了 permessage-deflate 才启用压缩 / 解压；否则明文收发
+        # （服务端未协商 deflate 却收到压缩帧会被当协议违规直接断开）。
+        comp = zlib.compressobj(wbits=-zlib.MAX_WBITS) if use_deflate else None
+        decomp = zlib.decompressobj(-zlib.MAX_WBITS) if use_deflate else None
+        self.ssock = ssock
+        self.use_deflate = use_deflate
+        self.comp = comp
+        self.decomp = decomp
+
+    def synth(self, text, voice, rate, pitch, volume, debug=False):
+        """合成一句，返回 mp3 bytes。任何异常上抛，由 synthesize() 负责丢弃重建。"""
+        ssock = self.ssock
+        if ssock is None:
+            raise ConnectionError("Edge TTS 会话未建立")
+        config, ssml = _build_messages(voice, su.escape(text), rate, pitch, volume)
+        self.error_stage = "send"
+        _send_frame(ssock, config, opcode=1, comp=self.comp)
+        _send_frame(ssock, ssml, opcode=1, comp=self.comp)
+        # 解压器整条连接共用（context takeover）。未协商时为 None。
+        decomp = self.decomp
+        audio = bytearray()
+        turn_ended = False
+        # 跨帧分片重组：一条消息可能由多帧组成（首帧 opcode=2/FIN=0，其余 opcode=0
+        # 续帧，末帧 FIN=1）。必须整条消息拼齐后再按长度前缀切掉头部，否则会把头
+        # 字节混进 mp3 导致文件损坏。
+        msg_op = None
+        msg_buf = bytearray()
+        self.error_stage = "recv"
+        while not turn_ended:
+            fin, opcode, payload = _read_frame(ssock, decomp)
+            if opcode == 8:               # close：服务端主动断开，连接作废
+                self.dead = True
+                break
+            if opcode == 9:               # ping -> 必须回 pong
+                _send_frame(ssock, payload, opcode=10, comp=None)
+                if debug:
+                    print("[debug] ping -> pong (%d B)" % len(payload))
+                continue
+            if opcode == 10:              # pong
+                if debug:
+                    print("[debug] pong")
+                continue
+            if opcode == 0:               # 续帧：拼到当前消息
+                msg_buf += payload
+            else:                         # 新消息首帧
+                msg_op = opcode
+                msg_buf = bytearray(payload)
+            if not fin:                   # 还有后续分片，继续拼
+                continue
+            # —— 一条完整消息已拼齐，按类型处理 ——
+            if msg_op == 2:               # binary = audio
+                # 前 2 字节 = header_length（大端），随后 header_length 字节是头部，
+                # 再后面才是 mp3 字节；必须按显式长度前缀切分，不要去找 "Path:audio"。
+                if len(msg_buf) >= 2:
+                    header_length = int.from_bytes(msg_buf[:2], "big")
+                    if 2 + header_length <= len(msg_buf):
+                        audio += msg_buf[2 + header_length:]
+                    else:
+                        sep = msg_buf.find(b"\r\n\r\n")
+                        if sep != -1:
+                            audio += msg_buf[sep + 4:]
+                if debug:
+                    print("[debug] audio 累计 %d B" % len(audio))
+            elif msg_op == 1:             # text = 状态 / 结束标记
+                if debug:
+                    print("[debug] text: %r" % msg_buf[:80])
+                if b"turn.end" in msg_buf:
+                    turn_ended = True
+            msg_op = None
+            msg_buf = bytearray()
+        if self.dead:
+            raise ConnectionError("Edge TTS 连接被服务端关闭")
+        return bytes(audio)
+
+    def close(self):
+        try:
+            if self.ssock is not None:
+                self.ssock.close()
+        except Exception:
+            pass
+        self.ssock = None
+
+
+# 每线程一个复用会话（预取线程 / 当前句合成线程各自独立，无锁竞争）
+_local = threading.local()
+
+
+def _get_session(timeout=40):
+    s = getattr(_local, "session", None)
+    if s is None or getattr(s, "dead", True):
+        try:
+            s = _Session(timeout=timeout)
+        except Exception:
+            s = None
+        _local.session = s
+    return s
+
+
 def synthesize(text, voice, rate="+0%", pitch="+0Hz", volume="+0%",
                timeout=40, retries=2, debug=False):
-    """合成一句话，返回 mp3 字节（bytes）。失败抛异常（含重试）。"""
-    safe_text = su.escape(text)
-    config, ssml = _build_messages(voice, safe_text, rate, pitch, volume)
+    """合成一句话，返回 mp3 字节（bytes）。失败抛异常（含重试）。
 
+    连接复用：每条线程维护一个 _Session（threading.local），握手一次后
+    连续合成多句；合成失败 / 连接断开时丢弃会话、下次重建（退回原行为）。
+    这样 Edge 在线语音的句间间隔显著缩短（只剩纯网络往返，无重建握手）。
+    """
     last_err = None
     stage = "init"
     for attempt in range(retries + 1):
         try:
-            stage = "ssl"                  # 出错时能看出卡在哪一步（自检面板会显示）
-            ctx = _make_ssl_context()      # 安卓上必须显式带上 CA（见 _make_ssl_context）
-            stage = "connect"
-            sock = socket.create_connection((_WS_HOST, _WS_PORT), timeout=timeout)
-            stage = "tls"
-            ssock = ctx.wrap_socket(sock, server_hostname=_WS_HOST)
-            try:
-                stage = "handshake"
-                use_deflate = _ws_handshake(ssock, str(uuid.uuid4()))
-                # 仅当服务端确实协商了 permessage-deflate 才启用压缩 / 解压。
-                # 否则明文收发——之前“连接被提前关闭”的根因正是：服务端未协商
-                # deflate，客户端却压缩了出站帧（带 RSV1 位），服务端视为协议违规直接断开。
-                comp = zlib.compressobj(wbits=-zlib.MAX_WBITS) if use_deflate else None
-                stage = "send"
-                _send_frame(ssock, config, opcode=1, comp=comp)
-                _send_frame(ssock, ssml, opcode=1, comp=comp)
-                # 解压器整条连接共用（context takeover）。未协商时为 None。
-                decomp = zlib.decompressobj(-zlib.MAX_WBITS) if use_deflate else None
-                audio = bytearray()
-                turn_ended = False
-                # 跨帧分片重组：一条消息可能由多帧组成（首帧 opcode=2/FIN=0，
-                # 其余 opcode=0 续帧，末帧 FIN=1）。必须整条消息拼齐后再剥离
-                # "Path:audio...\\r\\n\\r\\n" 头，否则会把头字节混进 mp3 导致文件损坏。
-                msg_op = None
-                msg_buf = bytearray()
-                stage = "recv"
-                while not turn_ended:
-                    fin, opcode, payload = _read_frame(ssock, decomp)
-                    if opcode == 8:               # close
-                        break
-                    if opcode == 9:               # ping -> 必须回 pong
-                        _send_frame(ssock, payload, opcode=10, comp=None)
-                        if debug:
-                            print(f"[debug] ping -> pong ({len(payload)}B)")
-                        continue
-                    if opcode == 10:              # pong
-                        if debug:
-                            print("[debug] pong")
-                        continue
-                    if opcode == 0:               # 续帧：拼到当前消息
-                        msg_buf += payload
-                    else:                         # 新消息首帧
-                        msg_op = opcode
-                        msg_buf = bytearray(payload)
-                    if not fin:                   # 还有后续分片，继续拼
-                        continue
-                    # —— 一条完整消息已拼齐，按类型处理 ——
-                    if msg_op == 2:               # binary = audio
-                        # Edge 下行音频帧结构（与官方 edge-tts 一致）：
-                        #   前 2 字节 = header_length（大端），
-                        #   随后 header_length 字节 = 头部（X-RequestId/Path:audio…），
-                        #   再后面才是 mp3 字节。
-                        # 不要去找 "Path:audio" 或 "\\r\\n\\r\\n"——那是头部的内部内容，
-                        # 必须按显式的长度前缀精确切分，否则会把头字节混进 mp3。
-                        if len(msg_buf) < 2:
-                            pass
-                        else:
-                            header_length = int.from_bytes(msg_buf[:2], "big")
-                            if 2 + header_length <= len(msg_buf):
-                                audio += msg_buf[2 + header_length:]
-                            else:
-                                # 长度异常时退回按首行空白行兜底
-                                sep = msg_buf.find(b"\r\n\r\n")
-                                if sep != -1:
-                                    audio += msg_buf[sep + 4:]
-                        if debug:
-                            print(f"[debug] audio 累计 {len(audio)}B")
-                    elif msg_op == 1:             # text = 状态 / 结束标记
-                        if debug:
-                            print(f"[debug] text: {msg_buf[:80]!r}")
-                        if b"turn.end" in msg_buf:
-                            turn_ended = True
-                    msg_op = None
-                    msg_buf = bytearray()
-                if debug:
-                    print(f"[debug] 结束，音频共 {len(audio)}B"
-                          f"（deflate={use_deflate}）")
-                return bytes(audio)
-            finally:
-                try:
-                    ssock.close()
-                except Exception:
-                    pass
+            s = _get_session(timeout)
+            if s is None:
+                raise RuntimeError("Edge TTS 无法建立会话")
+            stage = "synth"
+            return s.synth(text, voice, rate, pitch, volume, debug=debug)
         except Exception as e:
-            # 带上失败的阶段名（ssl/connect/tls/handshake/send/recv），
-            # 出错信息会显示在 App 的设置→自检信息里，便于一眼定位
+            # 出错：丢弃会话，下次重建（跨 5 分钟令牌轮换 / 断线都靠它自愈）
+            if s is not None:
+                stage = getattr(s, "error_stage", "synth")
+            try:
+                old = getattr(_local, "session", None)
+                if old is not None:
+                    old.close()
+            except Exception:
+                pass
+            _local.session = None
             last_err = "[%s] %r" % (stage, e)
             time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"Edge TTS 合成失败（已重试 {retries} 次）: {last_err}")
-
+    raise RuntimeError("Edge TTS 合成失败（已重试 %d 次）: %s" % (retries, last_err))
 
 def synthesize_to_file(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
     """合成并落盘。⚠️ 必须先写临时文件再原子 replace：

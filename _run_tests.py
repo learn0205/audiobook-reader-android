@@ -128,6 +128,51 @@ def test_edge_flow():
     e._stop_tick_loop() if hasattr(e, "_stop_tick_loop") else None
 
 
+def test_edge_prefetch_parallel():
+    """预取逻辑回归：从当前句 n 触发预取，应并行合成后面 1/2/3 句（共 3 句），
+    且**不**包含当前句本身；每句独立线程并行（不串行等上一句）。
+
+    这是「Edge 在线语音偶尔较长间隔」修复的核心：预取提前到当前句一开始合成就
+    触发、深度 3、并行，使推进时后续句基本命中本地缓存、无现场合成停顿。"""
+    import edge_tts_client
+    import tts_engine
+    from tts_engine import EdgeTTS
+
+    calls = []
+
+    def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
+        calls.append(text)
+        with open(path, "wb") as f:
+            f.write(b"FAKEMP3")
+        time.sleep(0.02)
+        return 7
+
+    edge_tts_client.synthesize_to_file = fake_synth
+
+    e = EdgeTTS()
+    e._cache_dir = tempfile.mkdtemp()        # 等同 _set_cache_dir 的底层目录
+    e.set_voice("zh-CN-YunxiNeural")
+    # 6 句，当前句 index=0
+    e.load(["当前句第零。", "后续一。", "后续二。", "后续三。",
+            "后续四。", "后续五。"])
+    e._generation = 1
+    e._prefetch_ahead(0, 1)                  # 模拟 _speak_current 触发的预取
+
+    # 并行预取，轮询等缓存落盘（最多 5 秒）
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if len(calls) >= 3:
+            break
+        time.sleep(0.03)
+    cached = sum(1 for _, s in e._sentences if os.path.exists(e._cache_path(s)))
+    check("edge: 预取并行写出后续3句(不含当前句)",
+          cached == 3 and "当前句第零。" not in calls,
+          "cached=%d calls=%s" % (cached, calls))
+    check("edge: 预取覆盖 index+1/+2/+3",
+          ("后续一。" in calls) and ("后续二。" in calls) and ("后续三。" in calls),
+          "calls=%s" % calls)
+
+
 def test_config_backup():
     from config_manager import ConfigManager
     p = os.path.join(tempfile.mkdtemp(), "config.json")
@@ -463,6 +508,7 @@ def main_run():
     #    所以「设置弹窗」这组不碰异步节奏的测试放在最后跑。
     test_layout()
     test_edge_flow()
+    test_edge_prefetch_parallel()
     test_config_backup()
     test_history()
     test_settings_popup()
