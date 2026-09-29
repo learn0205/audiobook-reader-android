@@ -27,11 +27,20 @@ import android.os.Build;
  * 自检屏显示「媒体控制 未挂 JVM exception: NullPointerException」）。这种情况
  * 不再让异常吞掉整条通知——降级为「无 MediaSession 的纯通知」，书名/控制按钮
  * 照常工作；MediaStyle 媒体卡片仅在 session 可用时挂上。
+ *
+ * ⚠️ 「播放/暂停」按**动作语义**上报（play / pause），不再合成一个 playpause
+ * 让 Python 去反转：外部命令（蓝牙重连自动续播、锁屏/ROM 重发媒体键）在播状态
+ * 下到达时，反转会把「正在播」变成「暂停」——用户看到的就是"念着念着自己停下、
+ * 没有任何提示"。语义化 + 幂等执行后，重复的播放命令是无害的空操作。
  */
 public class MediaControls {
     public static final String ACTION_PREV = "org.audiobookreader.android.MEDIA_PREV";
-    public static final String ACTION_PLAYPAUSE = "org.audiobookreader.android.MEDIA_PLAYPAUSE";
     public static final String ACTION_NEXT = "org.audiobookreader.android.MEDIA_NEXT";
+    /** 明确的播放/暂停（推荐路径）。 */
+    public static final String ACTION_PLAY = "org.audiobookreader.android.MEDIA_PLAY";
+    public static final String ACTION_PAUSE = "org.audiobookreader.android.MEDIA_PAUSE";
+    /** 旧版遗留：单键切换。仅为兼容旧 Python 侧保留，本类不再发送。 */
+    public static final String ACTION_PLAYPAUSE = "org.audiobookreader.android.MEDIA_PLAYPAUSE";
     private static final String CHANNEL_ID = "playback_controls";
     private static final int NOTIF_ID = 424242;
 
@@ -48,8 +57,8 @@ public class MediaControls {
             try {
                 sSession = new MediaSession(ctx, "AudioBookReader");
                 sSession.setCallback(new MediaSession.Callback() {
-                    @Override public void onPlay() { fire("playpause"); }
-                    @Override public void onPause() { fire("playpause"); }
+                    @Override public void onPlay() { fire("play"); }
+                    @Override public void onPause() { fire("pause"); }
                     @Override public void onSkipToNext() { fire("next"); }
                     @Override public void onSkipToPrevious() { fire("prev"); }
                 });
@@ -67,11 +76,15 @@ public class MediaControls {
                     String a = i.getAction();
                     if (ACTION_NEXT.equals(a)) fire("next");
                     else if (ACTION_PREV.equals(a)) fire("prev");
+                    else if (ACTION_PLAY.equals(a)) fire("play");
+                    else if (ACTION_PAUSE.equals(a)) fire("pause");
                     else if (ACTION_PLAYPAUSE.equals(a)) fire("playpause");
                 }
             };
             IntentFilter f = new IntentFilter();
-            f.addAction(ACTION_PREV); f.addAction(ACTION_PLAYPAUSE); f.addAction(ACTION_NEXT);
+            f.addAction(ACTION_PREV); f.addAction(ACTION_NEXT);
+            f.addAction(ACTION_PLAY); f.addAction(ACTION_PAUSE);
+            f.addAction(ACTION_PLAYPAUSE);
             if (Build.VERSION.SDK_INT >= 33) {
                 ctx.registerReceiver(sReceiver, f, Context.RECEIVER_NOT_EXPORTED);
             } else {
@@ -130,7 +143,10 @@ public class MediaControls {
                      pi(ctx, ACTION_PREV, 1))
              .addAction(playing ? android.R.drawable.ic_media_pause
                                 : android.R.drawable.ic_media_play,
-                     playing ? "暂停" : "播放", pi(ctx, ACTION_PLAYPAUSE, 2))
+                     playing ? "暂停" : "播放",
+                     // 按当前状态直接发「暂停」或「播放」——不发切换指令，
+                     // 免得同一条命令重发时把「正在播」反成「暂停」
+                     pi(ctx, playing ? ACTION_PAUSE : ACTION_PLAY, 2))
              .addAction(android.R.drawable.ic_media_next, "下一章",
                      pi(ctx, ACTION_NEXT, 3));
             if (Build.VERSION.SDK_INT >= 24 && sSession != null) {

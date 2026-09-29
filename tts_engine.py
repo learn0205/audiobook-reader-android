@@ -171,6 +171,12 @@ class EdgeTTS:
         self._cache_dir = ""
         self._synth_thread = None
         self._synthesizing = False   # 当前句是否在后台合成（合成本完成前绝不按超时推进）
+        # ---- 「有声进展」时间戳（卡死自检的唯一可信信号）----
+        # ⚠️ (段,字符) 整句播放期间恒定、isPlaying() 在部分 ROM 上恒 false，
+        #    唯一能证明「真的在出声」的是「媒体位置在前进」。
+        self._progress_ts = 0.0      # 上次确认有声进展的时刻
+        self._last_media_pos = -1    # 上次读到的媒体位置（毫秒）
+        self._pos_frozen = 0         # 媒体位置连续没变化的 tick 数（判「播完」用）
         self._prefetch_inflight = set()   # 预取中的缓存键（去重，防止同句并发合成）
         self._ready = True           # Edge 不需要离线初始化，构造即可用
         self._init_error = ""
@@ -196,37 +202,95 @@ class EdgeTTS:
         return bool(self._synthesizing)
 
     def media_position(self):
-        """播放器的真实媒体位置（毫秒）。
+        """播放器的真实媒体位置：返回 (是否确实在出声, 毫秒)。
 
-        ⚠️ 卡死自检的第二个信号源：Edge 的 get_position() 里的 char_pos
-        **整句播放期间是恒定的**（只在句尾推进时跳一格），长句朗读超过
-        卡死阈值就会被误判「卡死」。而 MediaPlayer.getCurrentPosition()
-        在真正出声时是毫秒级持续前进的——把它并入卡死判定键后：
-          · 播放器真在播、位置在走 → 永不误判；
-          · 播放器报 playing 但位置冻结（ROM 级卡死）→ 仍能被检出。
-        返回 (是否正在播, 毫秒)；桌面 / 无播放器返回 (False, -1)。
+        ⚠️ 两个坑（都踩过）：
+          1. `get_position()` 的 (段, 字符) **整句播放期间是恒定的**（只在句尾
+             推进时跳一格），拿它判「有没有在动」会把长句误判成卡死；
+          2. 不能只看 `isPlaying()`：部分 ROM 在正常播 mp3 时它恒为 false。
+             所以判定「在出声」的条件是「**位置比上次前进了** 或 isPlaying 为真」。
+
+        返回的毫秒位置**与第二个字段无关地原样返回** —— 调用方绝不能因为
+        「playing=False」就把位置丢掉（丢掉等于退回坑 1）。位置前进时同时刷新
+        `_progress_ts`，供 `progress_age()` 判断「多久没有声音进展」。
         """
-        if not _JNIUS_OK or self._player is None:
+        if self._player is None:
             return False, -1
         try:
-            return (bool(self._player.isPlaying()),
-                    int(self._player.getCurrentPosition()))
+            pos = int(self._player.getCurrentPosition())
         except Exception:
             return False, -1
+        playing = False
+        if pos != self._last_media_pos:
+            # 位置在走 = 确实在出声（不依赖 isPlaying 的可靠性）
+            self._last_media_pos = pos
+            self._progress_ts = time.time()
+            self._seen_playing = True
+            playing = True
+        else:
+            try:
+                playing = bool(self._player.isPlaying())
+            except Exception:
+                playing = False
+        if playing:
+            self._progress_ts = time.time()
+        return playing, pos
+
+    def progress_age(self):
+        """距上次「有声进展」的秒数（正在合成 / 从未播放时返回 0）。
+
+        有进展 = 媒体位置前进 / isPlaying 真 / 开始播放 / 句末推进 / 正在合成。
+        卡死自检**应该只看这一个信号**：它既不会把长句误判（位置在走），
+        又不会漏掉真卡死（位置、状态全冻住时它就会一直涨）。
+        """
+        if self._synthesizing:
+            return 0.0
+        if self._progress_ts <= 0:
+            return 0.0
+        return max(0.0, time.time() - self._progress_ts)
 
     def recover(self):
         """卡死自恢复：不动用断点/不切换状态，把当前句整条链路重开一遍。
 
         与「自动暂停」相比体验好得多：合成线程、播放器全部弃旧换新，
-        相当于无感重试当前句；只有 recover 本身抛异常才退回暂停。
+        相当于无感重试当前句。
+
+        ⚠️ 顺手删掉这一句的缓存文件：命中缓存就**跳过合成**，如果那份 mp3
+        本身是坏的（截断 / 只有几字节 / 静音），重开多少次都还是同一份坏文件
+        —— 表现就是「卡在某一句上永远念不出声」，删掉后这次会重新联网合成。
         """
         if self._state != STATE_PLAYING:
             return
         self._generation += 1
         self._synthesizing = False
         self._stop_player()
+        try:
+            if self._cache_dir and self._index < len(self._sentences):
+                bad = self._cache_path(self._sentences[self._index][1])
+                if os.path.exists(bad):
+                    os.remove(bad)
+        except Exception:
+            pass
+        self._last_media_pos = -1
+        self._progress_ts = time.time()
         self._set_state(STATE_PLAYING)      # 状态不变，仅触发通知刷新兜底
         self._speak_current()
+
+    def skip_current(self):
+        """跳过当前句（自恢复连续失败时的最后手段，不会让朗读停住）。
+
+        典型场景：这一句的音频链路怎么重开都没声（坏缓存 / 文本异常 /
+        ROM 播放器对该 mp3 不认）。以前只能一直卡在这一句上，现在跳过它继续
+        往下念，用户最多丢一句，朗读不会停。
+        """
+        if self._state != STATE_PLAYING:
+            return
+        self._generation += 1
+        self._synthesizing = False
+        self._stop_player()
+        self._last_media_pos = -1
+        self._progress_ts = time.time()
+        self._advance()
 
     def get_cps(self):
         return self._cps
@@ -348,13 +412,19 @@ class EdgeTTS:
             self._speak_current()
 
     def poll_advance(self):
-        """兜底推进：轮询 MediaPlayer.isPlaying()。
+        """兜底推进：判断「这一句播完了没有」。
 
-        ⚠️ 关键：合成本帧 mp3 是网络 IO（放子线程），在它完成之前，
-        当前句还没真正开始播放。此时**绝不能**按超时把这句「判读完了」，
-        否则会跳过整句、句子与音频错位。所以 `_synthesizing` 为真、
-        或播放器还没拿到时，一律只等、不推进；兜底的超时推进只在
-        「已经开始播过（_seen_playing）又停了」或「桌面无播放器逻辑测试」时生效。
+        ⚠️ 不能只问 `isPlaying()`：部分 ROM 在正常播 mp3 时它**恒为 false**。
+        以前一旦这样的设备上报 false，就会被当成「播完了」立刻推进 —— 句子被
+        拦腰切断、句子与音频错位。所以判定顺序改为：
+
+          1. **位置在前进** → 确定还在出声，什么都不做；
+          2. `isPlaying()` 为真 → 同上（位置粒度粗时兜住）；
+          3. 位置停住且「已到 mp3 末尾」(`pos >= duration-400ms`) → 这句真播完了；
+          4. 位置停住但**没到末尾** → 是卡住不是播完：不推进，交给 main 的卡死
+             自检（12s 后自恢复），免得把没播完的句子切掉；
+          5. 从没拿到任何「在播」信号（位置与 isPlaying 都不可信）→ 按预估时长
+             超时后强制推进（最后的保底，宁可错也不停死）。
         """
         if self._state != STATE_PLAYING:
             return
@@ -368,19 +438,48 @@ class EdgeTTS:
         # 设备上：合成中或还没拿到播放器 → 坚决不推进，等合成线程
         if self._synthesizing or self._player is None:
             return
+        pos, dur = -1, -1
         try:
-            playing = bool(self._player.isPlaying())
+            pos = int(self._player.getCurrentPosition())
         except Exception:
-            playing = False
-        if playing:
+            pos = -1
+        try:
+            dur = int(self._player.getDuration())
+        except Exception:
+            dur = -1
+        # 1) 位置在前进 = 确定在出声（不依赖 isPlaying 的可靠性）
+        if pos >= 0 and pos != self._last_media_pos:
+            self._last_media_pos = pos
+            self._pos_frozen = 0
             self._seen_playing = True
+            self._progress_ts = time.time()
             return
+        self._pos_frozen += 1
+        # 2) isPlaying() 仍可作为补充信号
+        try:
+            if bool(self._player.isPlaying()):
+                self._seen_playing = True
+                self._progress_ts = time.time()
+                self._pos_frozen = 0
+                return
+        except Exception:
+            pass
+        # 5) 从头到尾没得到「在播」信号 → 只能按预估时长兜底
         if not self._seen_playing:
-            # 引擎从头到尾没报告过「正在播放」（个别设备 isPlaying 恒 false）：
-            # 退到第三层兜底，按预估时长超时后强制推进
             if time.time() - self._sent_started > self._sentence_timeout():
                 self._timeout_factor = 1.3
                 self._complete_current()
+            return
+        # 3)/4) 播完了，还是卡住了？
+        if pos >= 0 and dur > 0:
+            # 位置与时长都可信：只有走到末尾才算这句播完
+            if pos < dur - 400:
+                # 没到末尾又不动 → 是卡住（ROM 级卡死 / 输出设备异常），
+                # 不推进、不切句子，交给 main 的卡死自检 12s 后自恢复重开本句
+                return
+        elif self._pos_frozen < 3:
+            # 位置/时长不可靠（-1）：至少连续 3 个 tick（≈0.6s）静止才算播完，
+            # 免得位置粒度粗时把还在播的句子拦腰切断
             return
         self._timeout_factor = 2.0
         self._complete_current()
@@ -407,6 +506,9 @@ class EdgeTTS:
         self._spoken_uid = "e%d" % self._generation
         self._seen_playing = False
         self._synthesizing = True            # 合成本完成前 poll_advance 不得按超时推进
+        self._progress_ts = time.time()      # 合成中即算「有进展」，卡死计时清零
+        self._last_media_pos = -1
+        self._pos_frozen = 0
         self._cur_chars = len(sentence)
         self._sent_started = time.time()
         gen = self._generation
@@ -512,6 +614,9 @@ class EdgeTTS:
             self._seen_playing = False
             self._sent_started = time.time()
             self._spoken_uid = "e%d" % generation
+            self._progress_ts = time.time()   # 起播 = 有进展
+            self._last_media_pos = -1
+            self._pos_frozen = 0
         except Exception as e:
             self._synthesizing = False
             self._spoken_uid = None
@@ -652,6 +757,8 @@ class EdgeTTS:
         self._synthesizing = False
         self._seen_playing = False
         self._error_count = 0
+        self._progress_ts = time.time()   # 句末推进 = 有进展
+        self._last_media_pos = -1
         self._note_cps(self._cur_chars, time.time() - self._sent_started)
         self._advance()
 
@@ -807,6 +914,40 @@ class ReaderTTS:
             # 系统引擎没有专用 recover：从当前段重播（等价于无感重试）
             para, _c, _t = be.get_position()
             be.play(para)
+
+    def progress_age(self):
+        """距上次「有声进展」的秒数。
+
+        ⚠️ 返回 **None** 而不是 0 表示「该后端不提供这个信号」——0 的含义是
+        「刚刚还有进展」，会让卡死自检永不触发；返回 None 时 main.py 会退回
+        「(段, 字符, 媒体毫秒) 是否变化」的旧判定。
+        """
+        be = self._backend()
+        fn = getattr(be, "progress_age", None)
+        if fn is None:
+            return None
+        try:
+            return float(fn())
+        except Exception:
+            return None
+
+    def skip_current(self):
+        """跳过当前句（自恢复连续失败时的兜底，保证朗读不会停死在一句上）。"""
+        be = self._backend()
+        fn = getattr(be, "skip_current", None)
+        if fn is not None:
+            try:
+                fn()
+                return
+            except Exception:
+                return
+        # 系统引擎：直接跳到下一段
+        try:
+            para, _c, _t = be.get_position()
+            nxt = min(int(para) + 1, max(0, len(self._paragraphs) - 1))
+            be.play(nxt)
+        except Exception:
+            pass
 
     def utter_listener_ok(self):
         """进度监听器是否成功挂上（AndroidTTS 专有；自检显示用）。"""

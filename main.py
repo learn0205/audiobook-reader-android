@@ -497,10 +497,19 @@ class AudioBookApp(App, WakelockFgMixin):
         self._media_cb = None
         self._media_error = ""
         self._is_playing = False
-        # ---- 卡死自检：播放态但长时间无推进 → 自动暂停并刷新媒体通知 ----
-        self._frozen_last = None          # 最近一次 (段, 字符) 推进位置
-        self._frozen_since_tick = None    # 位置停止变化起算的 _tick 序号
-        self._freeze_ticks = 60           # 0.2s × 60 ≈ 12s 无推进视为卡死
+        # ---- 卡死自检：播放态但长时间没有任何「有声进展」 → 自恢复（绝不静默暂停）----
+        self._frozen_last = None          # 最近一次 (段, 字符, 媒体毫秒) 位置键
+        self._frozen_since_tick = None    # 位置键停止变化起算的 _tick 序号
+        self._freeze_ticks = 60           # 0.2s × 60 ≈ 12s 无推进视为卡死（自检屏显示用）
+        self._freeze_secs = 12.0          # 同上，秒（引擎 progress_age 判定用）
+        self._freeze_recovers = 0         # 连续自恢复次数（连续 3 次仍无声音 → 跳句）
+        self._skips = 0                   # 累计跳句次数
+        self._last_freeze_note = ""       # 上次自恢复/跳句的时间与原因（自检屏）
+        self._last_freeze_toast = 0.0     # 自恢复提示限流（避免每 12s 弹一次）
+        # ---- 外部播放/暂停命令留痕（排查「念着念着自己停下」的关键证据）----
+        self._media_events = 0            # 收到外部（通知栏/耳机/蓝牙/媒体键）命令次数
+        self._last_media_event = ""       # 形如 "暂停@18:31:02 来源=通知栏/耳机"
+        self._last_playpause_ts = 0.0     # 旧版 Java "playpause" 去重用
 
     # ============================================================
     #                        启动
@@ -1584,6 +1593,7 @@ class AudioBookApp(App, WakelockFgMixin):
         if not self._paragraphs:
             self._toast("请先打开一本书")
             return
+        self._note_media_event("界面切换", "底部按钮")
         try:
             state = self._engine.get_state()
             if state == STATE_PLAYING:
@@ -1600,6 +1610,70 @@ class AudioBookApp(App, WakelockFgMixin):
             tb = traceback.format_exc()
             _record_crash(tb)
             self._on_error("播放/暂停出错：%s" % tb.strip().splitlines()[-1])
+
+    # ============================================================
+    #      外部播放/暂停命令（通知栏按钮 / 耳机线控 / 蓝牙 / 系统媒体键）
+    # ============================================================
+    def media_play(self, source="外部"):
+        """外部要求「播放」：**已经在播就什么都不做**（幂等）。
+
+        ⚠️ 这里以前接的是 `toggle_play()`：只要外面来一个「播放」请求，在播状态
+        就会被**反转成暂停** —— 蓝牙耳机重连自动续播、锁屏/系统重发 PLAY、
+        ROM 重复投递媒体键都会命中，表现就是「念着念着自己停下，且没有任何
+        提示」。播放/暂停类命令必须按**语义**执行，绝不能反转。
+        """
+        self._note_media_event("播放", source)
+        try:
+            if not self._paragraphs:
+                return
+            state = self._engine.get_state()
+            if state == STATE_PLAYING:
+                return                    # 已在播放：忽略重复命令（不再反转成暂停）
+            self._follow = True
+            if state == STATE_PAUSED:
+                self._engine.resume()
+            else:
+                para, _, _ = self._engine.get_position()
+                self._engine.play(para)
+        except Exception as e:
+            self._on_error("外部播放命令执行失败：%s" % e)
+
+    def media_pause(self, source="外部"):
+        """外部要求「暂停」：只在正在播时才暂停（幂等），并提示命令来源。
+
+        提示不是装饰：万一以后又出现「自己停下」，这条提示会直接告诉我们
+        是耳机/通知栏/系统的哪一次命令触发的，而不是继续靠猜。
+        """
+        self._note_media_event("暂停", source)
+        try:
+            if self._engine.get_state() != STATE_PLAYING:
+                return
+            self._engine.pause()
+            self._toast("已暂停朗读（%s）" % source)
+        except Exception as e:
+            self._on_error("外部暂停命令执行失败：%s" % e)
+
+    def _media_playpause_compat(self):
+        """旧版 Java 的 "playpause" 兼容入口（打包未更新时不至于反向升级）。
+
+        旧实现是「无脑反转」：同一个播放请求重复到达两次就会被反成暂停。
+        这里加 1 秒去重：重复命令直接忽略，其余仍按切换处理。
+        """
+        now = time.time()
+        if now - self._last_playpause_ts < 1.0:
+            self._note_media_event("忽略重复", "通知栏/耳机")
+            return
+        self._last_playpause_ts = now
+        self.toggle_play()
+
+    def _note_media_event(self, what, source):
+        """记录播放/暂停命令到自检屏（无 adb 时靠它定位「谁按的」）。"""
+        try:
+            self._media_events += 1
+            self._last_media_event = "%s@%s 来源=%s" % (
+                what, time.strftime("%H:%M:%S"), source)
+        except Exception:
+            pass
 
     def jump_paragraph(self, delta):
         if not self._paragraphs:
@@ -1784,6 +1858,7 @@ class AudioBookApp(App, WakelockFgMixin):
             # 重新进入播放态：清零卡死计速，避免把「开头合成等待」误判为卡死
             self._frozen_last = None
             self._frozen_since_tick = None
+            self._freeze_recovers = 0
         else:
             self._media_update(False)
             self._release_wake()
@@ -1856,16 +1931,15 @@ class AudioBookApp(App, WakelockFgMixin):
             # 用引擎的插值位置刷新进度条：否则它只在每读完一句时跳一格
             _para, char_now, total_chars = self._engine.get_position()
             self._on_progress(char_now, total_chars)
-            # 卡死自检：播放态但位置长时间不动 → 自动恢复/暂停并刷新媒体通知。
-            # 播放器的真实媒体位置（毫秒）也并入判定：Edge 的 (段,字符) 整句
-            # 播放期间是恒定的，长句会被误判；媒体位置在真出声时持续前进。
+            # 卡死自检：播放态但长时间没有任何「有声进展」 → 自恢复并刷新媒体通知。
+            # ⚠️ 绝不能因为 playing=False 就把毫秒位置丢掉：部分 ROM 在**正常播放**
+            #    时 isPlaying() 恒为 false，丢掉位置就等于退回「整句恒定」的
+            #    (段,字符) 判定 —— 长句又会被误判成卡死。
             _mpos = -1
             try:
                 _playing, _mpos = self._engine.media_position()
-                if not _playing:
-                    _mpos = -1
             except Exception:
-                pass
+                _mpos = -1
             self._check_playback_freeze(_para, char_now, _mpos)
         if self._sleep_until > 0:
             left = self._sleep_until - time.time()
@@ -1879,21 +1953,21 @@ class AudioBookApp(App, WakelockFgMixin):
         return True
 
     def _check_playback_freeze(self, para, char, media_pos=-1):
-        """卡死自检：播放态下位置长时间不动 → 自动恢复（重开当前句）。
+        """卡死自检：播放态下长时间没有任何「有声进展」→ 自恢复，**绝不静默暂停**。
 
-        ⚠️ 位置信号有三层，缺一就会误判（每一层都对应一次真实的误暂停）：
-          1. is_busy() —— Edge 在后台子线程合成 mp3（弱网可达十几秒），
-             期间位置不动属正常等待，直接清零计时；
-          2. media_pos（MediaPlayer.getCurrentPosition 毫秒）—— Edge 的
-             (段,字符) 只在句尾推进时才跳，**整句播放期间恒定**，长句
-             （1.1x 语速下 >12 秒，约 55+ 字）会被误判卡死。真出声时
-             媒体位置毫秒级持续前进，把它并入判定键后播放阶段不再误判；
-          3. (段,字符) —— 播放器没在播（播完了等回调 / ROM 级卡死）时，
-             用它兜底计时。
+        信号优先级（缺一层就会误判，每一层都对应一次真实的误停）：
+          1. `is_busy()` —— 正在联网合成当前句（弱网可达十几秒），位置不动属
+             正常等待，直接清零计时；
+          2. `progress_age()` —— 引擎自报「距上次有声进展」的秒数。有进展 =
+             媒体位置前进 / isPlaying 真 / 开始播放 / 句末推进 / 正在合成。
+             这是唯一可信的信号：Edge 的 (段, 字符) 整句播放期间恒定，
+             部分 ROM 的 `isPlaying()` 在正常播放时也恒为 false；
+          3. 后端不提供 progress_age 时，退回「(段, 字符, 媒体毫秒) 变没变」。
 
-        判定卡死后不再直接「自动暂停」（用户得手动点 ▶），而是调
-        engine.recover() 把当前句的合成/播放链路整条重开（无感重试），
-        恢复失败才退回暂停。
+        ⚠️ 判定卡死后只做**自恢复**（重开当前句），连续 3 次仍无声音才**跳句**。
+        以前这里会 `pause()`：用户听到的就是「念着念着自己停下、还得手动点 ▶」，
+        而且暂停是"没声音"的升级版（没声音 + 要人工干预）—— 两个都不可接受。
+        宁可多试几次 / 跳过一句，也不让朗读停住。
         """
         # 第一层：正在合成当前句（慢网络/抖动）→ 不算卡死，清掉计时重新算
         try:
@@ -1903,28 +1977,71 @@ class AudioBookApp(App, WakelockFgMixin):
                 return
         except Exception:
             pass
-        # 播放器报「正在播」时，用媒体位置参与判定（第三层兜底不适用）
-        key = (para, char, media_pos)
-        if self._frozen_last != key:
-            self._frozen_last = key
-            self._frozen_since_tick = self._tick_count
+
+        # 第二层：引擎自报「多久没有声音进展」（最可靠）
+        try:
+            age = self._engine.progress_age()
+        except Exception:
+            age = None
+
+        if age is not None:
+            if age < self._freeze_secs:
+                self._frozen_last = (para, char, media_pos)
+                self._frozen_since_tick = None
+                self._freeze_recovers = 0      # 声音又动了 → 自恢复计数清零
+                return
+            stalled = True
+        else:
+            # 第三层兜底：位置键变没变（旧判定的等价形式）
+            key = (para, char, media_pos)
+            if key != self._frozen_last:
+                self._frozen_last = key
+                self._frozen_since_tick = self._tick_count
+                return
+            if self._frozen_since_tick is None:
+                self._frozen_since_tick = self._tick_count
+                return
+            stalled = (self._tick_count - self._frozen_since_tick
+                       >= self._freeze_ticks)
+        if not stalled:
             return
-        if self._frozen_since_tick is None:
-            self._frozen_since_tick = self._tick_count
-            return
-        if self._tick_count - self._frozen_since_tick >= self._freeze_ticks:
-            self._frozen_since_tick = None
-            self._frozen_last = None
+
+        # 真卡死：先自恢复（重开本句），连续失败才跳句 —— 任何情况都不暂停
+        self._frozen_last = None
+        self._frozen_since_tick = None
+        _age_s = 0.0 if age is None else float(age)
+        try:
+            self._last_freeze_note = "%s 无声音%.0fs" % (
+                time.strftime("%H:%M:%S"), _age_s)
+        except Exception:
+            pass
+        if self._freeze_recovers >= 3:
+            self._freeze_recovers = 0
+            self._skips += 1
+            self._last_freeze_note += " 跳过1句(累计%d)" % self._skips
+            self._toast("这一句读不出来，已跳过继续")
             try:
-                # 自动恢复：当前句合成/播放链路整条重开（无感重试）
-                self._engine.recover()
-                self._toast("检测到播放卡顿，已自动恢复")
+                self._engine.skip_current()
             except Exception:
-                try:
-                    self._engine.pause()
-                    self._toast("播放似乎卡住，已自动暂停（点 ▶ 继续）")
-                except Exception:
-                    pass
+                pass
+            return
+        self._freeze_recovers += 1
+        self._last_freeze_note += " 自恢复第%d次" % self._freeze_recovers
+        # 提示限流：卡顿反复出现时不要每 12 秒弹一次
+        _now = time.time()
+        if _now - self._last_freeze_toast > 30:
+            self._last_freeze_toast = _now
+            self._toast("检测到播放卡顿，已自动重试本句")
+        try:
+            self._engine.recover()
+        except Exception as e:
+            # 自恢复本身失败也**不暂停**：改为跳句继续往下念
+            self._freeze_recovers = 3
+            try:
+                self._engine.skip_current()
+            except Exception:
+                pass
+            self._on_error("自恢复失败，已跳过：%s" % e)
 
     # ============================================================
     #  朗读推进兜底时钟：独立于 Kivy 逐帧时钟（熄屏也能跑）
@@ -2291,10 +2408,19 @@ class AudioBookApp(App, WakelockFgMixin):
 
         # 自检信息：无 adb 时让用户截图即可定位（装的是哪版 / 推进是否在跑 / 唤醒锁是否生效）
         _eng_state = self._engine.get_state() if self._engine is not None else "-"
-        # 卡死计时：播放态但位置停滞后，这里能看到「tick 仍在涨，但引擎卡在 playing」，
-        # 直接区分「推进链路活着 / 引擎(合成)卡住」—— 这正是定位卡死所需的两个数据点之一。
+        # 卡死自检：直接显示引擎自报的「距上次有声进展」秒数 + 自恢复/跳句计数。
+        # 播放中若「无进展」在涨，就是真卡死；停在 0.x 秒说明一直有声——
+        # 这两个数字能一眼区分「推进链路挂了 / 引擎没出声 / 一切正常」。
         try:
-            if _eng_state == "playing" and self._frozen_since_tick is not None:
+            _age = self._engine.progress_age() if self._engine is not None else None
+        except Exception:
+            _age = None
+        try:
+            if _age is not None:
+                _eng_extra = "  无进展%.1fs/%.0fs  自恢复%d  跳句%d" % (
+                    float(_age), self._freeze_secs,
+                    self._freeze_recovers, self._skips)
+            elif _eng_state == "playing" and self._frozen_since_tick is not None:
                 _stall = self._tick_count - self._frozen_since_tick
                 _eng_extra = "  卡死计时%d/%d" % (min(_stall, self._freeze_ticks),
                                                   self._freeze_ticks)
@@ -2366,6 +2492,8 @@ class AudioBookApp(App, WakelockFgMixin):
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
             "引擎 %s%s\n"
+            "卡顿 %s\n"
+            "媒体事件 %d  %s\n"
             "正文 %s\n"
             "记忆 书=%s  断点=%s\n"
             "崩溃 %s\n"
@@ -2379,7 +2507,11 @@ class AudioBookApp(App, WakelockFgMixin):
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",
                ("  " + self._fg_error) if self._fg_error else "",
-               _eng_state, _eng_extra, _layout,
+               _eng_state, _eng_extra,
+               (str(self._last_freeze_note)[:90] or "无"),
+               self._media_events,
+               (str(self._last_media_event)[:70] or "无"),
+               _layout,
                _book, _pos_s,
                (_crash_last or "无"),
                (str(self._last_error)[:120] or "无"))

@@ -216,13 +216,25 @@ class WakelockFgMixin:
         self._media_ok = False
 
     def _on_media_action(self, action):
-        """通知栏按钮 / 耳机按键 → Kivy 主线程执行（回调来自系统线程）。"""
+        """通知栏按钮 / 耳机线控 / 蓝牙按键 / 系统媒体键 → Kivy 主线程执行。
+
+        ⚠️ 「播放 / 暂停」必须按**语义**分发到 media_play / media_pause（幂等），
+        不能统一塞给 toggle_play —— 外部播放/暂停命令**经常会重复到达**
+        （蓝牙耳机重连自动续播、锁屏或 ROM 重发媒体键、耳机双击），
+        而反转语义会把「正在播」反成「暂停」，表现就是**念着念着自己停下、
+        且没有任何提示**。这是"自己停下"最隐蔽的一条路径，已按动作语义修掉。
+        `playpause` 仅作为旧版 Java 未重打包时的兼容入口保留。
+        """
         try:
             from kivy.clock import Clock
         except Exception:
             return
-        if action == "playpause":
-            Clock.schedule_once(lambda *_: self.toggle_play(), 0)
+        if action == "play":
+            Clock.schedule_once(lambda *_: self.media_play("通知栏/耳机"), 0)
+        elif action == "pause":
+            Clock.schedule_once(lambda *_: self.media_pause("通知栏/耳机"), 0)
+        elif action == "playpause":
+            Clock.schedule_once(lambda *_: self._media_playpause_compat(), 0)
         elif action == "next":
             Clock.schedule_once(lambda *_: self.jump_chapter(1), 0)
         elif action == "prev":

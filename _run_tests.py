@@ -7,6 +7,9 @@
   3) Edge 后端：逐句推进 + 播放期间预取 + 全句缓存（假合成，无网络）
   4) ConfigManager 备份导出/导入
   5) 设置弹窗：文字不被裁切 + 深浅主题对比度达标（见 test_settings_popup）
+  6) 「卡死自检」信号源：位置前进才算在出声 / 句中停住不切句 / 坏缓存能重开
+     （见 test_edge_progress_signal、test_edge_advance_not_cut）
+  7) 外部播放/暂停命令按语义幂等执行，不再反转状态（见 test_media_cmd_semantics）
 """
 import os
 import sys
@@ -502,6 +505,304 @@ def test_toc_follow():
         app._stop_tick_loop()
 
 
+def test_edge_progress_signal():
+    """卡死自检的两个信号源回归（桌面用假播放器，不需要安卓设备）。
+
+    1. `media_position()` 判定「在出声」**不能只看 isPlaying()**：部分 ROM 在
+       正常播 mp3 时它恒为 false，必须靠「位置比上次前进了」认定 —— 否则长句
+       会被判成卡死；
+    2. 毫秒位置**不能**因为 playing=False 就被丢成 -1（丢掉等于退回「整句恒定」
+       的 (段,字符) 判定，正是当初误暂停的根因）；
+    3. `recover()` 要顺手删掉当前句的坏缓存（坏 mp3 会让「重开本句」永远无声）；
+    4. `skip_current()` 必须能把卡住的一句跳过去，而不是让朗读停死。
+    """
+    import edge_tts_client
+    import tts_engine
+    from tts_engine import EdgeTTS
+    from tts_android import STATE_PLAYING
+
+    def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
+        with open(path, "wb") as f:
+            f.write(b"FAKEMP3")
+        return 7
+
+    edge_tts_client.synthesize_to_file = fake_synth
+
+    class _FakePlayer(object):
+        """模拟「正在播、但 isPlaying() 恒 false」的 ROM。"""
+
+        def __init__(self):
+            self.pos = 0
+
+        def getCurrentPosition(self):
+            return self.pos
+
+        def isPlaying(self):
+            return False          # ★ 关键：恒 false
+
+        def stop(self):
+            pass
+
+        def reset(self):
+            pass
+
+        def release(self):
+            pass
+
+    e = EdgeTTS()
+    e._cache_dir = tempfile.mkdtemp()
+    e.set_voice("zh-CN-YunxiNeural")
+    e.load(["第一句。", "第二句。", "第三句。"])
+    e._state = STATE_PLAYING
+    e._player = _FakePlayer()
+    e._synthesizing = False
+
+    # 1) 位置在前进 → 必须认定「在出声」（isPlaying() 不可信）
+    e._player.pos = 100
+    e.media_position()
+    e._player.pos = 300
+    playing, pos = e.media_position()
+    check("edge: 位置前进即认定在出声(isPlaying 恒false也不误判)",
+          playing and pos == 300, "playing=%s pos=%s" % (playing, pos))
+    check("edge: 位置在走 → 无进展计时归零",
+          e.progress_age() < 0.05, "age=%.3f" % e.progress_age())
+
+    # 2) 位置冻结 + isPlaying() false → 判定「没出声」，但**位置照样原样返回**
+    playing2, pos2 = e.media_position()
+    check("edge: 位置冻结时仍原样返回毫秒位置（不丢成 -1）",
+          (not playing2) and pos2 == 300, "playing=%s pos=%s" % (playing2, pos2))
+    time.sleep(0.25)
+    check("edge: 无声音进展计时会往上走（真卡死能检出）",
+          e.progress_age() >= 0.2, "age=%.3f" % e.progress_age())
+
+    # 3) 合成中一律算「有进展」（弱网合成十几秒不能被当卡死）
+    e._synthesizing = True
+    check("edge: 合成等待中不算卡死", e.progress_age() == 0.0,
+          "age=%.3f" % e.progress_age())
+
+    # 4) recover() 删掉当前句坏缓存 + 重启链路
+    #    注意：recover 会立刻重新合成这一句，所以缓存文件可能**又出现**（这正是
+    #    期望行为）—— 要断言的是「那份坏的没了」（不存在，或已被新内容覆盖）。
+    e._synthesizing = False
+    e._index = 1
+    bad = e._cache_path(e._sentences[1][1])
+    with open(bad, "wb") as f:
+        f.write(b"BAD")
+    gen = e._generation
+    e.recover()
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        try:
+            if (not os.path.exists(bad)) or open(bad, "rb").read() != b"BAD":
+                break
+        except OSError:
+            break
+        time.sleep(0.05)
+    try:
+        now_content = open(bad, "rb").read() if os.path.exists(bad) else None
+    except OSError:
+        now_content = None
+    check("edge: recover 清掉当前句坏缓存并重开链路",
+          (now_content != b"BAD") and e._generation > gen,
+          "content=%s gen=%d->%d" % (now_content, gen, e._generation))
+
+    # 5) skip_current() 跳过卡死的一句（继续往下念，不停死）
+    e._index = 1
+    e._speak_current = lambda: None      # 别真起合成线程（_advance 会调它）
+    e.skip_current()
+    check("edge: skip_current 跳过当前句继续往下",
+          e._index >= 2, "index=%d" % e._index)
+
+
+def test_edge_advance_not_cut():
+    """「这句播完了没有」的判定回归 —— 别在 `isPlaying()` 恒 false 的机器上切句子。
+
+    根因回顾：部分 ROM 在正常播 mp3 时 `isPlaying()` 恒为 false。旧逻辑一旦看到
+    false 且「播过」就认为播完 → 立刻推进下一句 → 句子被拦腰切断、与音频错位。
+    新逻辑要求「位置走到末尾」才算播完；中途停住属于卡住，交给卡死自检去重开本句。
+
+    另外还要保证「时长/位置不可信」（拿不到 -1）时仍有兜底：静止约 0.6s 后推进，
+    绝不会因为读不到位置就永远停死。
+    """
+    import edge_tts_client
+    import tts_engine
+    from tts_engine import EdgeTTS
+    from tts_android import STATE_PLAYING
+
+    def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
+        with open(path, "wb") as f:
+            f.write(b"FAKEMP3")
+        return 7
+
+    edge_tts_client.synthesize_to_file = fake_synth
+
+    class _LyingPlayer(object):
+        """isPlaying() 恒 false（模拟问题 ROM），位置/时长可控。"""
+
+        def __init__(self):
+            self.pos = 0
+            self.dur = 5000
+
+        def getCurrentPosition(self):
+            return self.pos
+
+        def getDuration(self):
+            return self.dur
+
+        def isPlaying(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def reset(self):
+            pass
+
+        def release(self):
+            pass
+
+    orig_jnius = tts_engine._JNIUS_OK
+    tts_engine._JNIUS_OK = True          # 让 poll_advance 走「真机分支」
+    try:
+        e = EdgeTTS()
+        e._cache_dir = tempfile.mkdtemp()
+        e.set_voice("zh-CN-YunxiNeural")
+        e.load(["第一句。", "第二句。", "第三句。"])
+        e._speak_current = lambda: None   # 不要把推进变成真合成
+        e._state = STATE_PLAYING
+        e._synthesizing = False
+        e._spoken_uid = "e1"
+        e._sent_started = time.time()
+        e._player = _LyingPlayer()
+        e._index = 0
+
+        # ① 位置在前进 → 不许推进（还在出声）
+        e._player.pos = 500
+        e.poll_advance()
+        e._player.pos = 900
+        e.poll_advance()
+        check("advance: 位置在走时绝不推进(isPlaying 恒false)",
+              e._index == 0 and e._seen_playing, "index=%d" % e._index)
+
+        # ② 位置停在句中（0.5s，远未到 5000）→ 仍不许推进（是卡住，不是播完）
+        e._player.pos = 900
+        for _ in range(8):
+            e.poll_advance()
+        check("advance: 句中停住不切句（交给卡死自检重开本句）",
+              e._index == 0, "index=%d" % e._index)
+
+        # ③ 位置走到末尾 → 位置停住的下一个 tick 判定「播完」并推进
+        #    （真机上末尾那一两个 tick 仍是「位置在走」，所以推进晚 0.2~0.4s；
+        #      正常情况下 OnCompletionListener 早就推进过了，这里只是兜底）
+        e._player.pos = 5000
+        e.poll_advance()                 # 位置 900→5000：仍算「在出声」
+        e.poll_advance()                 # 位置停在末尾：播完 → 推进
+        check("advance: 位置到末尾才推进", e._index == 1, "index=%d" % e._index)
+
+        # ④ 位置/时长都不可信（-1）→ 静止约 0.6s 后兜底推进（不停死）
+        e._player.pos = -1
+        e._player.dur = -1
+        e._index = 1
+        e._spoken_uid = "e2"
+        e._seen_playing = True
+        e._pos_frozen = 0
+        e._last_media_pos = 999          # 先让「位置没变」
+        for _ in range(4):
+            e.poll_advance()
+        check("advance: 读不到位置时长时静止约0.6s兜底推进",
+              e._index == 2, "index=%d frozen=%d" % (e._index, e._pos_frozen))
+    finally:
+        tts_engine._JNIUS_OK = orig_jnius
+
+
+def test_media_cmd_semantics():
+    """外部播放/暂停命令必须**按语义幂等执行**，绝不能反转状态。
+
+    曾经的 bug：通知栏/耳机/蓝牙命令全接到 toggle_play()，而 Java 侧把 onPlay()
+    与 onPause() 都映射成同一个 "playpause" —— 只要「播放」请求在播放中重复到达
+    （蓝牙耳机重连自动续播、锁屏/ROM 重发媒体键），就会被反转成**暂停**：
+    表现就是「念着念着自己停下，而且没有任何提示」。这条测试锁住语义。
+    """
+    from kivy.clock import Clock
+    from tts_android import STATE_PLAYING, STATE_PAUSED, STATE_STOPPED
+
+    app = shared_app()
+    path = os.path.join(tempfile.mkdtemp(), "t_media.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("第一章\n甲句。乙句。\n")
+    app.open_book(path)
+    for _ in range(4):
+        Clock.tick()
+
+    log = []
+    state = {"v": STATE_PLAYING}
+    orig = (app._engine.get_state, app._engine.pause,
+            app._engine.resume, app._engine.play)
+
+    def _set_play():
+        log.append("play")
+        state["v"] = STATE_PLAYING
+
+    try:
+        app._engine.get_state = lambda: state["v"]
+
+        def _pause():
+            log.append("pause")
+            state["v"] = STATE_PAUSED
+
+        def _resume():
+            log.append("resume")
+            state["v"] = STATE_PLAYING
+
+        app._engine.pause = _pause
+        app._engine.resume = _resume
+        app._engine.play = lambda *a: _set_play()
+
+        # ① 播放中来「播放」→ 必须什么都不做（以前会反转成暂停）
+        app.media_play("通知栏/耳机")
+        check("media: 播放中的重复播放命令不再反转成暂停",
+              state["v"] == STATE_PLAYING and not log,
+              "state=%s log=%s" % (state["v"], log))
+
+        # ② 播放中来「暂停」→ 暂停；重复到达也只暂停一次
+        app.media_pause("通知栏/耳机")
+        app.media_pause("通知栏/耳机")
+        check("media: 暂停命令幂等",
+              state["v"] == STATE_PAUSED and log == ["pause"],
+              "state=%s log=%s" % (state["v"], log))
+
+        # ③ 暂停中来「播放」→ 续播（而不是又切回暂停）
+        app.media_play("通知栏/耳机")
+        check("media: 暂停中收到播放命令会续播",
+              state["v"] == STATE_PLAYING and log[-1] == "resume",
+              "state=%s log=%s" % (state["v"], log))
+
+        # ④ 停止态收到「播放」→ 开始朗读
+        log[:] = []
+        state["v"] = STATE_STOPPED
+        app.media_play("通知栏/耳机")
+        check("media: 停止态收到播放命令开始朗读",
+              state["v"] == STATE_PLAYING and log == ["play"], "log=%s" % log)
+
+        # ⑤ 命令留痕（自检屏可见），便于定位「谁让它停的」
+        check("media: 外部命令留痕含来源",
+              app._media_events >= 5 and "通知栏/耳机" in app._last_media_event,
+              "n=%d last=%s" % (app._media_events, app._last_media_event))
+
+        # ⑥ 旧版 Java 的 "playpause" 兼容入口：1 秒内重复命令直接忽略
+        log[:] = []
+        state["v"] = STATE_PLAYING
+        app._last_playpause_ts = 0.0
+        app._media_playpause_compat()      # 第一次：正常切换（→ 暂停）
+        app._media_playpause_compat()      # 紧接着的重复：必须被忽略
+        check("media: 旧 playpause 重复命令被去重（不会被反成播放）",
+              state["v"] == STATE_PAUSED and log == ["pause"],
+              "state=%s log=%s" % (state["v"], log))
+    finally:
+        (app._engine.get_state, app._engine.pause,
+         app._engine.resume, app._engine.play) = orig
+
+
 def main_run():
     # ⚠️ 顺序不能随便调：test_edge_flow 依赖后台线程 tick Clock 的节奏，
     #    前面跑过多 App 实例/频繁 Clock.tick() 会让它偶发 early=1。
@@ -509,12 +810,15 @@ def main_run():
     test_layout()
     test_edge_flow()
     test_edge_prefetch_parallel()
+    test_edge_progress_signal()
+    test_edge_advance_not_cut()
     test_config_backup()
     test_history()
     test_settings_popup()
     test_jump_default_paused()
     test_long_press_play_index()
     test_toc_follow()
+    test_media_cmd_semantics()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 
