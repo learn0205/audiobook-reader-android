@@ -64,6 +64,29 @@ class WakelockFgMixin:
                 pass
             self._wake_lock = None
 
+    def battery_allowlisted(self):
+        """本应用是否已在「电池不优化」白名单里 —— 熄屏后不被冻结的关键开关。
+
+        为什么这是核心：系统的「缓存应用冻结」按 **UID 白名单** 判定
+        （`shouldNotFreeze = uidRec.isCurAllowListed()`）。不白名单时，熄屏一段时间
+        后主进程会被冻结 → Python 推进循环与联网合成全部挂起 → 当前这句 mp3 播完
+        就没人推进下一句（用户感受就是「熄屏一会儿就不念了，亮屏又自己接上」）。
+        PARTIAL_WAKE_LOCK 只保证 CPU 不睡，**不能**免冻结。
+
+        返回 True/False；桌面环境或 ROM 取不到该接口时返回 None（调用方不打扰用户）。
+        """
+        if not _JNIUS_OK:
+            return None
+        try:
+            Context = autoclass("android.content.Context")
+            PowerManager = autoclass("android.os.PowerManager")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            pm = activity.getSystemService(Context.POWER_SERVICE)
+            return bool(pm.isIgnoringBatteryOptimizations(
+                str(activity.getPackageName())))
+        except Exception:
+            return None
+
     def _start_fg_service(self):
         if not _JNIUS_OK or self._fg_started:
             return

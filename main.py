@@ -510,6 +510,14 @@ class AudioBookApp(App, WakelockFgMixin):
         self._media_events = 0            # 收到外部（通知栏/耳机/蓝牙/媒体键）命令次数
         self._last_media_event = ""       # 形如 "暂停@18:31:02 来源=通知栏/耳机"
         self._last_playpause_ts = 0.0     # 旧版 Java "playpause" 去重用
+        # ---- 系统冻结检测（熄屏后「念着念着停了、亮屏又接上」的成因）----
+        self._last_tick_wall = 0.0        # 上次 _tick 的墙上时间
+        self._freeze_gap_secs = 30.0      # tick 间隔 > 它 = 进程刚被系统冻结过
+        self._freeze_events = 0           # 累计被冻结次数
+        self._last_freeze_gap = 0.0       # 最近一次冻结时长（秒）
+        self._freeze_during_play = False  # 是否有过「播放中被冻结」（就是熄屏停读）
+        self._freeze_hint_ts = 0.0        # 冻结提示限流（避免刷屏）
+        self._keepalive_prompted = False  # 本次运行是否已提示过白名单
 
     # ============================================================
     #                        启动
@@ -1675,6 +1683,73 @@ class AudioBookApp(App, WakelockFgMixin):
         except Exception:
             pass
 
+    # ============================================================
+    #      后台保活：电池不优化白名单（熄屏不被系统冻结的前提）
+    # ============================================================
+    def _maybe_prompt_keepalive(self):
+        """开始播放时，若本应用还没进「电池不优化」白名单 → 提示一次。
+
+        ⚠️ 这就是「熄屏播放一段时间后停止、打开软件又恢复播放」的成因：
+        熄屏后系统把本应用的**主进程**当缓存应用冻结（Android 11+ 的
+        Cached Apps Freezer，vivo 还叠加自家后台管控），我们的 Python 推进
+        循环与联网合成都被挂起 —— 当前这句 mp3 播完，就再没人推进下一句。
+        唤醒锁只保证 CPU 不睡，**不能**免冻结；按 UID 判定的「电池不优化」
+        白名单是第三方应用唯一可靠的办法（同 services/playback.py 的注释）。
+        """
+        if self._keepalive_prompted or self._config.get("keepalive_prompted", False):
+            return
+        try:
+            ok = self.battery_allowlisted()
+        except Exception:
+            ok = None
+        if ok is None:              # 桌面环境 / ROM 取不到 → 不打扰用户
+            return
+        self._keepalive_prompted = True
+        try:
+            self._config.set("keepalive_prompted", True)
+            self._config.save()
+        except Exception:
+            pass
+        if ok:                      # 已经白名单了：不用提示
+            return
+        Clock.schedule_once(lambda _dt: self._show_keepalive_popup(), 0.6)
+
+    def _show_keepalive_popup(self):
+        """一次性引导：把应用加入「电池不优化 / 后台不被冻结」白名单。"""
+        try:
+            popup = Popup(title="让朗读熄屏后不中断", size_hint=(0.9, 0.62))
+            box = BoxLayout(orientation="vertical", spacing=dp(12),
+                            padding=[dp(14), dp(14), dp(14), dp(14)],
+                            size_hint_y=None)
+            box.bind(minimum_height=box.setter("height"))
+            box.add_widget(self._auto_label(
+                "系统会把熄屏后的后台进程冻结：朗读会在当前这句读完后停住，"
+                "重新打开软件才接上。\n\n"
+                "下一屏请把本应用设为「允许 / 不优化」，之后熄屏听书就不会"
+                "再被打断。",
+                font_size="13sp", min_height=dp(130), halign="left"))
+            row = BoxLayout(size_hint_y=None, spacing=dp(10))
+            btn_later = ABButton(text="暂不")
+            btn_go = ABPrimaryButton(text="一键允许")
+
+            def _later(*_):
+                popup.dismiss()
+
+            def _go(*_):
+                popup.dismiss()
+                self._open_power_settings()
+
+            btn_later.bind(on_release=_later)
+            btn_go.bind(on_release=_go)
+            row.add_widget(btn_later)
+            row.add_widget(btn_go)
+            self._auto_row(row)
+            box.add_widget(row)
+            popup.content = box
+            popup.open()
+        except Exception as e:
+            self._on_error("保活提示打开失败：%s" % e)
+
     def jump_paragraph(self, delta):
         if not self._paragraphs:
             return
@@ -1859,6 +1934,8 @@ class AudioBookApp(App, WakelockFgMixin):
             self._frozen_last = None
             self._frozen_since_tick = None
             self._freeze_recovers = 0
+            # 首次播放时提示一次「电池不优化白名单」（熄屏不被冻结的前提）
+            self._maybe_prompt_keepalive()
         else:
             self._media_update(False)
             self._release_wake()
@@ -1923,6 +2000,29 @@ class AudioBookApp(App, WakelockFgMixin):
         # ★ 朗读推进的兜底：不依赖安卓的 onDone 回调。
         #   有设备上 onDone 根本不触发，只靠它就会「读完一句卡住不动」。
         #   这里用 isSpeaking() 轮询，0.2 秒一次，最多多等 0.2 秒。
+        #
+        # ★ 冻结检测（熄屏后「念着念着停了、亮屏又接上」的成因就在这里）：
+        #   本循环是「Python 线程 sleep 0.2s → Handler 投递主线程」。熄屏一段时间
+        #   后，系统会把本应用的主进程放进**缓存冻结**（Android 11+ 的
+        #   Cached Apps Freezer；vivo 还会叠加自家后台管控），整条循环连同联网
+        #   合成一起被挂起 —— 当前这句 mp3 播完就再没人推进下一句。
+        #   被冻结期间 wall clock 照走，所以解冻后的第一次 tick 会出现**异常大的
+        #   间隔**：正常 0.2s，被冻结则几十秒到几分钟。据此就能确认「是系统冻结，
+        #   不是我们的逻辑卡住」，并顺便告诉用户该去加白名单。
+        _now = time.time()
+        if self._last_tick_wall > 0:
+            _gap = _now - self._last_tick_wall
+            if _gap > self._freeze_gap_secs:
+                self._freeze_events += 1
+                self._last_freeze_gap = _gap
+                if self._is_playing:
+                    self._freeze_during_play = True
+                    # 提示限流：连续多次冻结不要刷屏
+                    if _now - self._freeze_hint_ts > 180:
+                        self._freeze_hint_ts = _now
+                        self._toast("系统把后台朗读冻结了 %.0f 秒（已自动续读）；"
+                                    "建议在设置里加入「省电白名单」" % _gap)
+        self._last_tick_wall = _now
         self._tick_count += 1
         self._engine.poll_advance()
 
@@ -2485,12 +2585,21 @@ class AudioBookApp(App, WakelockFgMixin):
                 _crash_last = _CRASH["text"].strip().splitlines()[-1][:170]
         except Exception:
             _crash_last = ""
+        # 保活：白名单状态 + 被系统冻结的次数/最近时长。
+        # 「熄屏后念着念着停了、亮屏又接上」= 主进程被缓存冻结（Python 推进循环
+        # 与联网合成一起挂起）。这两个数字就是它的证据：冻结>0 且最近时长很大。
+        try:
+            _bat = self.battery_allowlisted()
+            _bat_s = ("已允许" if _bat else "未允许") if _bat is not None else "未知"
+        except Exception:
+            _bat_s = "未知"
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
             "监听器 %s   媒体控制 %s\n"
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
+            "保活 电池白名单=%s  冻结%d次 最近%.0fs\n"
             "引擎 %s%s\n"
             "卡顿 %s\n"
             "媒体事件 %d  %s\n"
@@ -2507,6 +2616,7 @@ class AudioBookApp(App, WakelockFgMixin):
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",
                ("  " + self._fg_error) if self._fg_error else "",
+               _bat_s, self._freeze_events, self._last_freeze_gap,
                _eng_state, _eng_extra,
                (str(self._last_freeze_note)[:90] or "无"),
                self._media_events,

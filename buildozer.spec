@@ -99,7 +99,13 @@ p4a.branch = develop
 #   以下三个是前台服务所需（Android 12+ 后台朗读必须靠前台服务）：
 #   FOREGROUND_SERVICE / FOREGROUND_SERVICE_MEDIA_PLAYBACK（Android 14+ 必需）
 #   POST_NOTIFICATIONS（Android 13+ 显示前台服务通知需要）
-android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS
+#   REQUEST_IGNORE_BATTERY_OPTIMIZATIONS —— 允许应用直接弹系统「允许后台运行？」
+#               授权框（ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS）。
+#               ⚠️ 少了这个权限，那个直弹框会抛 SecurityException、只能退到
+#               电池设置总列表页 —— 用户很难找到入口。而**加不加白名单决定了
+#               熄屏后会不会被系统冻结**（冻结 = 当前句播完没人推进下一句，
+#               表现为「熄屏一会儿就不念了，亮屏又自己接上」）。
+android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
 
 # ---------------------------------------------------------------------------
 #  前台服务：让系统在熄屏 / 切后台时不冻结本 App，保证朗读连续。

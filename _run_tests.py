@@ -796,6 +796,90 @@ def test_switch_backend_stops_old():
           "para=%s" % (r._edge.get_position()[0] if r._edge else None))
 
 
+def test_freeze_detect_and_keepalive():
+    """「熄屏播放一段时间后停止、打开软件又恢复」对应的两件事：
+
+    ① 冻结检测：推进循环正常 0.2 秒一次；被系统冻结时 wall clock 照走，解冻后
+       第一次 tick 的间隔会异常大 —— 据此确认「是系统冻结，不是我们的逻辑卡住」，
+       并在自检屏留下「冻结N次 最近Xs」作为证据。
+    ② 白名单引导：未进「电池不优化」白名单时提示**一次**（带一键去设置），
+       已白名单 / 取不到状态时都不打扰用户。
+    """
+    from kivy.clock import Clock
+
+    app = shared_app()
+
+    # ---- ① 冻结检测 ----
+    app._freeze_events = 0
+    app._last_freeze_gap = 0.0
+    app._freeze_during_play = False
+    app._freeze_hint_ts = time.time()
+    app._is_playing = False
+    app._last_tick_wall = time.time() - 0.2
+    app._tick()
+    check("freeze: 正常 0.2s 间隔不算冻结", app._freeze_events == 0,
+          "events=%d" % app._freeze_events)
+
+    app._is_playing = True
+    app._last_tick_wall = time.time() - 65.0
+    app._tick()
+    check("freeze: 间隔异常大即判定被系统冻结过",
+          app._freeze_events == 1 and app._last_freeze_gap >= 60,
+          "events=%d gap=%.1f" % (app._freeze_events, app._last_freeze_gap))
+    check("freeze: 记录「播放中被冻结」（熄屏停读的成因）",
+          app._freeze_during_play, "")
+    app._is_playing = False
+
+    # ---- ② 白名单引导（只在未白名单时提示一次）----
+    # ⚠️ 不能靠 `Clock.tick(0.7)` 去触发那个 0.6s 延迟：启动期还排了
+    #    `_restore_last_book`(0.6s)，在无书环境里它会让进程静默退出（测试环境的坑）。
+    #    这里把 main 模块里的 Clock 换成立刻执行的替身，确定性驱动。
+    import main as _main_mod
+
+    class _NowClock(object):
+        @staticmethod
+        def schedule_once(f, dt=0, **kw):
+            f(dt)
+
+    shown = []
+    orig_bat, orig_popup, orig_clock = (app.battery_allowlisted,
+                                        app._show_keepalive_popup,
+                                        _main_mod.Clock)
+    try:
+        _main_mod.Clock = _NowClock()
+        app._show_keepalive_popup = lambda: shown.append(1)
+
+        app._keepalive_prompted = False
+        app._config.set("keepalive_prompted", False)
+        app.battery_allowlisted = lambda: False
+        app._maybe_prompt_keepalive()
+        app._maybe_prompt_keepalive()          # 第二次不该再弹
+        check("keepalive: 未白名单时提示一次且只一次",
+              len(shown) == 1 and app._config.get("keepalive_prompted", False),
+              "shown=%d" % len(shown))
+
+        shown[:] = []
+        app._keepalive_prompted = False
+        app._config.set("keepalive_prompted", False)
+        app.battery_allowlisted = lambda: True
+        app._maybe_prompt_keepalive()
+        check("keepalive: 已白名单不打扰", not shown, "shown=%s" % shown)
+
+        shown[:] = []
+        app._keepalive_prompted = False
+        app._config.set("keepalive_prompted", False)
+        app.battery_allowlisted = lambda: None   # 取不到（桌面 / ROM 不支持）
+        app._maybe_prompt_keepalive()
+        check("keepalive: 状态未知时不打扰",
+              (not shown) and not app._config.get("keepalive_prompted", False),
+              "shown=%s" % shown)
+    finally:
+        app.battery_allowlisted = orig_bat
+        app._show_keepalive_popup = orig_popup
+        _main_mod.Clock = orig_clock
+        app._keepalive_prompted = True            # 后续测试不再弹
+
+
 def test_media_cmd_semantics():
     """外部播放/暂停命令必须**按语义幂等执行**，绝不能反转状态。
 
@@ -900,6 +984,7 @@ def main_run():
     test_long_press_play_index()
     test_toc_follow()
     test_switch_backend_stops_old()
+    test_freeze_detect_and_keepalive()
     test_media_cmd_semantics()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
