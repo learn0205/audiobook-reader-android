@@ -2765,10 +2765,17 @@ class AudioBookApp(App, WakelockFgMixin):
         box.add_widget(self._safe_text(btn_power, min_height=dp(44)))
 
         # 自启动 / 后台运行权限（各 ROM 是隐藏页，这里按包名逐个试跳转）
-        btn_auto = ABButton(text="自启动 / 后台权限", size_hint_y=None,
+        btn_auto = ABButton(text="自启动 / 后台权限（可选）", size_hint_y=None,
                             height=dp(44))
         btn_auto.bind(on_release=lambda *_: self._open_autostart_settings())
         box.add_widget(self._safe_text(btn_auto, min_height=dp(44)))
+        # 说明：实测有 ROM 的「自启动列表」里根本没有本应用 —— 那种列表只列注册过
+        # 开机启动（BOOT_COMPLETED）的应用，本应用没有这类组件，属正常。
+        # 熄屏不被冻结真正要靠的是上面那一项「省电白名单」。
+        box.add_widget(self._auto_label(
+            "※ 熄屏后不被冻结靠的是上面的「省电白名单」；"
+            "自启动列表里没有本应用属正常（本应用没有开机启动组件）。",
+            font_size="11sp", min_height=dp(34), halign="left"))
 
         # 主界面去掉了停止键（播放键改成暂停/继续切换），
         # 停止功能放这里，需要时还能用。

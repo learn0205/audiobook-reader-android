@@ -167,34 +167,63 @@ class WakelockFgMixin:
         except Exception as e:
             self._toast("无法打开系统设置：%s" % e)
 
+    def _open_app_details(self):
+        """打开系统里「本应用」的应用详情页（所有 ROM 都有，兜底用）。"""
+        if not _JNIUS_OK:
+            return False
+        try:
+            Intent = autoclass("android.content.Intent")
+            Settings = autoclass("android.provider.Settings")
+            Uri = autoclass("android.net.Uri")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            it = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            it.setData(Uri.parse("package:" + str(activity.getPackageName())))
+            activity.startActivity(it)
+            return True
+        except Exception:
+            return False
+
     def _open_autostart_settings(self):
-        """打开「自启动 / 后台运行」管理页（隐藏入口逐个尝试，全失败退到应用详情页）。"""
+        """打开「自启动 / 后台运行」管理页。
+
+        ⚠️ 两个坑（用户实测踩到）：
+          1. 靠 `startActivity` 抛不抛异常来判断「页面在不在」不可靠 —— 组件存在时
+             不会抛异常，但打开的那个列表里**可能根本没有本应用**。vivo / i 管家
+             的「自启动管理」只列出**注册过开机启动（BOOT_COMPLETED）**的应用，
+             而本应用没有任何自启动组件，所以不在列表里 —— 这是正常的，
+             而且「自启动」对「熄屏后继续朗读」并不关键（要紧的是省电白名单）。
+          2. 所以跳转前先用 PackageManager **校验组件真实存在**，全都没命中就直接
+             落到本应用详情页（任何 ROM 都能从这里进电池 / 权限 / 后台运行）。
+        """
         if not _JNIUS_OK:
             self._toast("桌面环境无此设置")
             return
         try:
             Intent = autoclass("android.content.Intent")
             ComponentName = autoclass("android.content.ComponentName")
-            Settings = autoclass("android.provider.Settings")
-            Uri = autoclass("android.net.Uri")
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            pkg = str(activity.getPackageName())
+            pm = activity.getPackageManager()
 
             for comp_pkg, comp_cls in self._AUTOSTART_ENTRIES:
                 try:
                     it = Intent()
                     it.setComponent(ComponentName(comp_pkg, comp_cls))
+                    # ★ 先校验：解析不到就别跳（免得跳到一个跟本应用无关的页面）
+                    if pm.resolveActivity(it, 0) is None:
+                        continue
                     activity.startActivity(it)
-                    self._toast("请在列表里允许本应用「自启动 / 后台运行」")
+                    self._toast("若列表里没有本应用属正常（本应用没有开机启动组件）；"
+                                "要紧的是「省电白名单（后台不被冻结）」那一项")
                     return
                 except Exception:
                     continue
 
-            # 兜底：应用详情页（从这里一般能找到电池 / 权限 / 自启动入口）
-            it = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-            it.setData(Uri.parse("package:" + pkg))
-            activity.startActivity(it)
-            self._toast("请在「电池 / 权限」里允许后台运行；或到设置顶部搜索“自启动”")
+            # 兜底：本应用详情页（从这里能进电池 / 权限 / 后台运行）
+            if self._open_app_details():
+                self._toast("已打开本应用详情页：请在「电池 / 后台运行」里允许；"
+                            "或在设置顶部搜索“自启动”")
+            else:
+                self._toast("无法打开系统设置页")
         except Exception as e:
             self._toast("无法打开系统设置：%s" % e)
 
