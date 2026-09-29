@@ -177,6 +177,7 @@ class EdgeTTS:
         self._progress_ts = 0.0      # 上次确认有声进展的时刻
         self._last_media_pos = -1    # 上次读到的媒体位置（毫秒）
         self._pos_frozen = 0         # 媒体位置连续没变化的 tick 数（判「播完」用）
+        self._last_player_step = ""  # 起播失败时卡在哪一步（错误信息里带上）
         self._prefetch_inflight = set()   # 预取中的缓存键（去重，防止同句并发合成）
         self._ready = True           # Edge 不需要离线初始化，构造即可用
         self._init_error = ""
@@ -584,6 +585,48 @@ class EdgeTTS:
         else:
             self._advance()
 
+    def _start_player(self, path, generation):
+        """新建 MediaPlayer 并起播；失败时抛异常，由调用方决定重试 / 跳过。
+
+        出错时把「走到哪一步」记进 `_last_player_step` —— 真机上只给一条
+        `IllegalStateException` 根本分不清是 setDataSource、prepare 还是 start
+        出的问题（用户截图里正是这样一条截断的错误信息）。
+        """
+        MediaPlayer = autoclass("android.media.MediaPlayer")
+        self._last_player_step = "new"
+        player = MediaPlayer()
+        try:
+            # setDataSource(String) 与 setDataSource(FileDescriptor) 重载并存，
+            # 显式塞 java.lang.String 避免 pyjnius 选错重载（与 tts_android 同款坑）
+            jpath = autoclass("java.lang.String")(path)
+            self._last_player_step = "setDataSource"
+            player.setDataSource(jpath)
+            # 播完即时推进：MediaPlayer 播完事件走监听器（pyjnius 可实现接口），
+            # 不再等 0.2s 一次的 poll_advance 轮询发现「不播了」——
+            # 这个轮询延迟是句间停顿的组成部分之一。
+            self._last_player_step = "setOnCompletionListener"
+            self._completion_cb = _PlayerCompletion(self, generation)
+            player.setOnCompletionListener(self._completion_cb)
+            self._last_player_step = "prepare"
+            player.prepare()       # 短 mp3，同步 prepare 可接受
+            self._last_player_step = "start"
+            player.start()
+        except Exception:
+            try:
+                player.release()
+            except Exception:
+                pass
+            raise
+        self._player = player
+        self._synthesizing = False
+        self._seen_playing = False
+        self._sent_started = time.time()
+        self._spoken_uid = "e%d" % generation
+        self._progress_ts = time.time()   # 起播 = 有进展
+        self._last_media_pos = -1
+        self._pos_frozen = 0
+        self._last_player_step = ""
+
     def _play_file(self, path, generation):
         if generation != self._generation:
             return
@@ -596,31 +639,23 @@ class EdgeTTS:
             self._seen_playing = False
             return
         try:
-            MediaPlayer = autoclass("android.media.MediaPlayer")
-            player = MediaPlayer()
-            # setDataSource(String) 与 setDataSource(FileDescriptor) 重载并存，
-            # 显式塞 java.lang.String 避免 pyjnius 选错重载（与 tts_android 同款坑）
-            jpath = autoclass("java.lang.String")(path)
-            player.setDataSource(jpath)
-            # 播完即时推进：MediaPlayer 播完事件走监听器（pyjnius 可实现接口），
-            # 不再等 0.2s 一次的 poll_advance 轮询发现「不播了」——
-            # 这个轮询延迟是句间停顿的组成部分之一。
-            self._completion_cb = _PlayerCompletion(self, generation)
-            player.setOnCompletionListener(self._completion_cb)
-            player.prepare()       # 短 mp3，同步 prepare 可接受
-            player.start()
-            self._player = player
-            self._synthesizing = False
-            self._seen_playing = False
-            self._sent_started = time.time()
-            self._spoken_uid = "e%d" % generation
-            self._progress_ts = time.time()   # 起播 = 有进展
-            self._last_media_pos = -1
-            self._pos_frozen = 0
+            self._start_player(path, generation)
+            return
         except Exception as e:
+            _step = self._last_player_step or "?"
+        # ★ 重试一次（全新的播放器）：真机上见过「进程被系统冻结过之后，
+        #   MediaPlayer 抛 IllegalStateException」——那是被冻结打断后残留的
+        #   异常状态，整条重开基本就好。**不能让一句播放失败把朗读停住**。
+        if generation != self._generation:
+            return
+        try:
+            self._stop_player()
+            self._start_player(path, generation)
+            return
+        except Exception as e2:
             self._synthesizing = False
             self._spoken_uid = None
-            self.on_error("Edge 播放失败：%s" % e)
+            self.on_error("Edge 播放失败(%s→重试也失败)：%s" % (_step, e2))
             self._advance()
 
     def _prune_cache(self, keep_path=None):

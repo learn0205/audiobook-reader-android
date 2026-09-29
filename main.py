@@ -513,7 +513,8 @@ class AudioBookApp(App, WakelockFgMixin):
         # ---- 系统冻结检测（熄屏后「念着念着停了、亮屏又接上」的成因）----
         self._last_tick_wall = 0.0        # 上次 _tick 的墙上时间
         self._freeze_gap_secs = 30.0      # tick 间隔 > 它 = 进程刚被系统冻结过
-        self._freeze_events = 0           # 累计被冻结次数
+        self._freeze_events = 0           # 累计被冻结次数（含闲置时被冻，属正常）
+        self._freeze_play_events = 0      # ★ 播放中被冻结的次数（这个才有害）
         self._last_freeze_gap = 0.0       # 最近一次冻结时长（秒）
         self._freeze_during_play = False  # 是否有过「播放中被冻结」（就是熄屏停读）
         self._freeze_hint_ts = 0.0        # 冻结提示限流（避免刷屏）
@@ -2016,12 +2017,16 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._freeze_events += 1
                 self._last_freeze_gap = _gap
                 if self._is_playing:
+                    # ★ 只有「播放中被冻结」才会真的造成「熄屏后不念」；
+                    #   闲置时（没在朗读）被冻是系统的正常行为，不该混在一起数，
+                    #   否则白名单生效了也可能看到「冻结N次」而误判。
+                    self._freeze_play_events += 1
                     self._freeze_during_play = True
                     # 提示限流：连续多次冻结不要刷屏
                     if _now - self._freeze_hint_ts > 180:
                         self._freeze_hint_ts = _now
-                        self._toast("系统把后台朗读冻结了 %.0f 秒（已自动续读）；"
-                                    "建议在设置里加入「省电白名单」" % _gap)
+                        self._toast("系统把后台朗读冻结了 %.0f 秒（已自动续读）"
+                                    % _gap)
         self._last_tick_wall = _now
         self._tick_count += 1
         self._engine.poll_advance()
@@ -2599,7 +2604,7 @@ class AudioBookApp(App, WakelockFgMixin):
             "监听器 %s   媒体控制 %s\n"
             "唤醒锁 %s%s\n"
             "前台服务 %s%s\n"
-            "保活 电池白名单=%s  冻结%d次 最近%.0fs\n"
+            "保活 电池白名单=%s  冻结%d次(播放中%d) 最近%.0fs\n"
             "引擎 %s%s\n"
             "卡顿 %s\n"
             "媒体事件 %d  %s\n"
@@ -2616,7 +2621,8 @@ class AudioBookApp(App, WakelockFgMixin):
                ("  " + self._wake_error) if self._wake_error else "",
                "已启动" if self._fg_started else "未启动",
                ("  " + self._fg_error) if self._fg_error else "",
-               _bat_s, self._freeze_events, self._last_freeze_gap,
+               _bat_s, self._freeze_events, self._freeze_play_events,
+               self._last_freeze_gap,
                _eng_state, _eng_extra,
                (str(self._last_freeze_note)[:90] or "无"),
                self._media_events,

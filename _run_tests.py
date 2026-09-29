@@ -811,6 +811,7 @@ def test_freeze_detect_and_keepalive():
 
     # ---- ① 冻结检测 ----
     app._freeze_events = 0
+    app._freeze_play_events = 0
     app._last_freeze_gap = 0.0
     app._freeze_during_play = False
     app._freeze_hint_ts = time.time()
@@ -820,14 +821,24 @@ def test_freeze_detect_and_keepalive():
     check("freeze: 正常 0.2s 间隔不算冻结", app._freeze_events == 0,
           "events=%d" % app._freeze_events)
 
+    # 闲置（没在朗读）时被冻：总数记，但**不能**算进「播放中冻结」——
+    # 否则白名单生效了也会看到「冻结N次」而误判
+    app._last_tick_wall = time.time() - 90.0
+    app._tick()
+    check("freeze: 闲置被冻只记总数、不计入播放中",
+          app._freeze_events == 1 and app._freeze_play_events == 0,
+          "all=%d play=%d" % (app._freeze_events, app._freeze_play_events))
+
     app._is_playing = True
     app._last_tick_wall = time.time() - 65.0
     app._tick()
-    check("freeze: 间隔异常大即判定被系统冻结过",
-          app._freeze_events == 1 and app._last_freeze_gap >= 60,
-          "events=%d gap=%.1f" % (app._freeze_events, app._last_freeze_gap))
-    check("freeze: 记录「播放中被冻结」（熄屏停读的成因）",
-          app._freeze_during_play, "")
+    check("freeze: 播放中被冻单独计数（这才是熄屏停读的成因）",
+          app._freeze_events == 2 and app._freeze_play_events == 1
+          and app._last_freeze_gap >= 60,
+          "all=%d play=%d gap=%.1f" % (app._freeze_events,
+                                       app._freeze_play_events,
+                                       app._last_freeze_gap))
+    check("freeze: 记录「播放中被冻结」标志", app._freeze_during_play, "")
     app._is_playing = False
 
     # ---- ② 白名单引导（只在未白名单时提示一次）----
@@ -878,6 +889,102 @@ def test_freeze_detect_and_keepalive():
         app._show_keepalive_popup = orig_popup
         _main_mod.Clock = orig_clock
         app._keepalive_prompted = True            # 后续测试不再弹
+
+
+def test_edge_play_retry():
+    """起播失败要**自动重试一次**（全新播放器），并把失败步骤写进错误信息。
+
+    真机证据（用户截图）：`Edge 播放失败：JVM exception occured:
+    java.lang.IllegalStateException … android.media.MediaPlayer` —— 只给这一条信息
+    既分不清是 setDataSource 还是 start 出的问题，也看不出会不会自愈。
+    现在：① 错误信息带步骤名；② 失败自动重开一次（被系统冻结打断后残留的异常
+    状态往往一次就好）；③ 两次都失败才跳过这一句 —— 绝不让朗读停住。
+    """
+    import tts_engine
+    from tts_engine import EdgeTTS
+    from tts_android import STATE_PLAYING
+
+    errors = []
+    e = EdgeTTS(on_error=errors.append)
+    e._cache_dir = tempfile.mkdtemp()
+    e.set_voice("zh-CN-YunxiNeural")
+    e.load(["第一句。", "第二句。"])
+    e._state = STATE_PLAYING
+    e._generation = 1
+    e._speak_current = lambda: None      # 别真起合成线程（_advance 会调它）
+
+    class _BadPlayer(object):
+        """第一个实例在 setDataSource 抛异常（模拟冻结残留的 IllegalState）；
+        之后新建的都正常 —— 用来验证「重试一次就好」。"""
+        made = []
+
+        def __init__(self):
+            self.ok = bool(_BadPlayer.made)
+            _BadPlayer.made.append(self)
+
+        def setDataSource(self, p):
+            if not self.ok:
+                raise RuntimeError("java.lang.IllegalStateException")
+
+        def setOnCompletionListener(self, l):
+            pass
+
+        def prepare(self):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def reset(self):
+            pass
+
+        def release(self):
+            pass
+
+    class _FakeCb(object):
+        def __init__(self, *a, **k):
+            pass
+
+    orig_ac = tts_engine.autoclass
+    orig_jnius = tts_engine._JNIUS_OK
+    orig_cb = tts_engine._PlayerCompletion
+    tts_engine.autoclass = (lambda name: _BadPlayer
+                            if name == "android.media.MediaPlayer"
+                            else (lambda *a: a))
+    tts_engine._PlayerCompletion = _FakeCb
+    tts_engine._JNIUS_OK = True
+    try:
+        e._play_file("/tmp/x.mp3", 1)
+        check("play: 起播失败自动重试一次即成功",
+              len(_BadPlayer.made) == 2 and e._player is not None and not errors,
+              "made=%d err=%s" % (len(_BadPlayer.made), errors))
+
+        # 两次都失败 → 报错里要带步骤名，并且跳过这一句继续（不停住）
+        _BadPlayer.made = []
+        errors[:] = []
+        e._index = 0
+
+        class _AlwaysBad(_BadPlayer):
+            def setDataSource(self, p):
+                raise RuntimeError("java.lang.IllegalStateException")
+
+        tts_engine.autoclass = (lambda name: _AlwaysBad
+                                if name == "android.media.MediaPlayer"
+                                else (lambda *a: a))
+        e._state = STATE_PLAYING
+        e._index = 0
+        before = e._index
+        e._play_file("/tmp/y.mp3", e._generation)
+        check("play: 连续失败时报错带步骤名并跳过继续",
+              errors and "setDataSource" in errors[0] and e._index > before,
+              "err=%s index=%d" % (errors[:1], e._index))
+    finally:
+        tts_engine.autoclass = orig_ac
+        tts_engine._PlayerCompletion = orig_cb
+        tts_engine._JNIUS_OK = orig_jnius
 
 
 def test_media_cmd_semantics():
@@ -985,6 +1092,7 @@ def main_run():
     test_toc_follow()
     test_switch_backend_stops_old()
     test_freeze_detect_and_keepalive()
+    test_edge_play_retry()
     test_media_cmd_semantics()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
