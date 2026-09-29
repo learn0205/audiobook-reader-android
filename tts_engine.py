@@ -1025,11 +1025,35 @@ class ReaderTTS:
         return self._active
 
     def _switch_backend(self, target):
+        """切换后端（系统引擎 ↔ Edge），并把进度原样搬过去。
+
+        ⚠️ 切换前必须把**旧后端真正停掉**：以前只换指针就直接起播新后端，于是
+        「系统引擎还在念这一句、Edge 又从同一起点念一遍」—— 用户听到**两个
+        声音同时读小说**。
+
+        ⚠️ 停旧后端时要**临时摘掉它的 on_state**：`stop()` 会广播 STOPPED，
+        那会把前台服务 / 通知栏媒体卡片 / 唤醒锁整条拆掉，紧接着新后端起播又
+        重建一遍（通知闪一下、锁屏媒体卡片被清掉）。切换对外是一次原子转移，
+        不该让外部状态先经历一次「彻底停止」。
+        """
         # 记下当前进度与播放态，把新后端载入同一本书并 seek 回去
         prev_state = self._backend().get_state()
         para, char, _ = self._backend().get_position()
+        old = self._backend()
         self._active = target
         be = self._backend()              # 触发 _ensure_edge（若切到 edge）
+        # ★ 先停旧后端（且不广播 STOPPED），再起新后端 —— 杜绝两个引擎同时发声
+        try:
+            if old is not None and old is not be:
+                saved = getattr(old, "on_state", None)
+                old.on_state = lambda *a: None
+                try:
+                    old.stop()
+                finally:
+                    if saved is not None:
+                        old.on_state = saved
+        except Exception:
+            pass
         be.load(self._paragraphs)
         be.set_voice(self._voice_name)
         be.seek_paragraph(para)

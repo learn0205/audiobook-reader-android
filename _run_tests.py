@@ -715,6 +715,87 @@ def test_edge_advance_not_cut():
         tts_engine._JNIUS_OK = orig_jnius
 
 
+def test_switch_backend_stops_old():
+    """切换音色（系统引擎 ↔ Edge）时，旧后端必须被**真正停掉**。
+
+    曾经的 bug：`_switch_backend()` 只换指针就直接起播新后端，旧的系统引擎还
+    在念那一句 —— 用户听到**两个声音同时读小说**。
+
+    另外还要保证停旧后端时**不广播 STOPPED**：那会让 main 把前台服务 / 通知栏
+    媒体卡片 / 唤醒锁整条拆掉，紧接着新后端起播又重建一遍（通知闪一下、
+    锁屏媒体卡片被清）。切换对外应该是一次原子的转移。
+    """
+    import edge_tts_client
+    from tts_engine import ReaderTTS
+    from tts_android import STATE_PLAYING, STATE_STOPPED
+
+    def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
+        with open(path, "wb") as f:
+            f.write(b"FAKEMP3")
+        return 7
+
+    edge_tts_client.synthesize_to_file = fake_synth
+
+    class _StubBackend(object):
+        """假的系统引擎：只记录被调用了什么。"""
+
+        def __init__(self, state=STATE_PLAYING):
+            self.state = state
+            self.stopped = 0
+            self.played = []
+            self.on_state = None
+            self._para = 1
+            # _ensure_edge 会从 android 后端拷这些参数
+            self._speed = 1.0
+            self._pitch = 0
+            self._intonation = True
+
+        def get_state(self):
+            return self.state
+
+        def get_position(self):
+            return (self._para, 0, 100)
+
+        def load(self, ps):
+            pass
+
+        def set_voice(self, n):
+            pass
+
+        def seek_paragraph(self, p):
+            self._para = p
+
+        def play(self, p=None):
+            self.played.append(p)
+            self.state = STATE_PLAYING
+
+        def stop(self):
+            self.stopped += 1
+            self.state = STATE_STOPPED
+
+    events = []
+    r = ReaderTTS(on_state=events.append, user_data_dir=tempfile.mkdtemp())
+    stub = _StubBackend(STATE_PLAYING)
+    r._android = stub
+    r._paragraphs = ["第一段甲句。", "第二段乙句。"]
+    r._merged_voices = [{"name": "sys-voice", "source": "android"},
+                        {"name": "zh-CN-YunxiNeural", "source": "edge"}]
+
+    # 系统引擎正在念第 1 段 → 切到 Edge 音色
+    r.set_voice("zh-CN-YunxiNeural")
+
+    check("switch: 旧后端被真正停掉（不会再两个声音同时念）",
+          stub.stopped == 1, "stopped=%d" % stub.stopped)
+    check("switch: 停旧后端时不广播 STOPPED（前台服务/通知不闪）",
+          STATE_STOPPED not in events, "events=%s" % events)
+    check("switch: 新后端接上并继续朗读",
+          r._active == "edge" and STATE_PLAYING in events,
+          "active=%s events=%s" % (r._active, events))
+    check("switch: 进度搬到新后端同一段",
+          r._edge is not None and r._edge.get_position()[0] == 1,
+          "para=%s" % (r._edge.get_position()[0] if r._edge else None))
+
+
 def test_media_cmd_semantics():
     """外部播放/暂停命令必须**按语义幂等执行**，绝不能反转状态。
 
@@ -818,6 +899,7 @@ def main_run():
     test_jump_default_paused()
     test_long_press_play_index()
     test_toc_follow()
+    test_switch_backend_stops_old()
     test_media_cmd_semantics()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
