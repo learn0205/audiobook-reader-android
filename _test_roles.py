@@ -61,6 +61,7 @@ def test_role_parser():
         "夏弥点了点头，她把叶子夹进了书里。",
         "上山的路很陡，老太太拄着拐杖慢慢往上爬。",
         "「小伙子，搭把手。」老太太说道。",
+        "「路上滑，当心点。」老太太又说道。",
     ]
     characters, speakers = analyze(paras)
     names = [n for n, _c in characters]
@@ -70,6 +71,7 @@ def test_role_parser():
     check("识别出夏弥", "夏弥" in names, str(names))
     check("识别出老太太", "老太太" in names, str(names))
     check("不会把「夏弥笑」当成新人物", "夏弥笑" not in names, str(names))
+    check("不会把「缓缓」当成人物", "缓缓" not in names, str(names))
     check("按出场顺序排序", names[0] == "楚子航", str(names))
 
     check("「楚子航说道」→ 楚子航", spk(speakers, 1, paras[1]) == "楚子航",
@@ -87,9 +89,30 @@ def test_role_parser():
           repr(spk(speakers, 8, paras[8])))
     check("「老太太说道」→ 老太太", spk(speakers, 11, paras[11]) == "老太太",
           repr(spk(speakers, 11, paras[11])))
+    check("「老太太又说道」→ 老太太", spk(speakers, 12, paras[12]) == "老太太",
+          repr(spk(speakers, 12, paras[12])))
     check("老太太归类为奶奶", cat.get("老太太") == "奶奶", str(characters))
     check("夏弥归类为女角色（同段「她」投票）",
           cat.get("夏弥") == "女角色", str(characters))
+
+    # 频率门槛：只出场一次的候选不算人物（防止误报进映射清单）
+    p4 = [
+        "「只有一句台词。」路人甲说道。",
+        "楚子航道：「我在。」",
+        "楚子航说道：「我也在。」",
+    ]
+    c4, s4 = analyze(p4)
+    n4 = [n for n, _ in c4]
+    check("只出场一次的人物不进清单", "路人甲" not in n4, str(c4))
+    check("多次出场的人物进清单", "楚子航" in n4, str(c4))
+    check("单次出场者的说话人标注仍有效", spk(s4, 0, p4[0]) == "路人甲",
+          str(s4))
+
+    # 精度：副词/动作词开头不算人物
+    p5 = ["缓缓说道：「嗯。」", "缓缓说道：「好。」", "低头看了看，笑了笑。"]
+    c5, _s5 = analyze(p5)
+    n5 = [n for n, _ in c5]
+    check("「缓缓」「低头」不算人物", not n5, str(c5))
 
     # 引号后置标签
     p2 = ["「站住。」路明非喊道。"]

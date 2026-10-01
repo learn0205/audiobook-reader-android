@@ -100,6 +100,7 @@ _ADVERBS = {
     "轻声", "高声", "大声", "小声", "厉声", "柔声", "连忙", "急忙", "顿时",
     "随即", "忽然", "突然", "接着", "然后", "终于", "半天", "片刻", "良久",
     "说道", "笑道", "想了", "想了想", "叹气", "抬头", "低头", "转身", "回头",
+    "又", "再", "还", "先", "便",
 }
 _PARTICLES = set("的地了着")
 
@@ -115,21 +116,41 @@ _ACTION_VERB_RE = re.compile(
     "停|顿|沉|迈|跨|绕|退|跟|带|领|挡|拦|躲|避|闪|伸|缩|僵|颤|抖|扬|垂|歪|偏|凑|俯|仰|弯|挪|踱|"
     "点头|摇头|起身|抬头|低头|开口|深吸|吐气|呼气|喘|愣|怔|醒|闭|睁|耸肩|鼓掌|皱眉|挑眉)")
 
-# 高频非人名词语（动作句 / 标签误匹配时剔除）
+# 高频非人名词语（动作句 / 标签误匹配时剔除）。
+# 同时用作「人名子串」黑名单：候选名里含这些词（如「心中一凛」含「心中」）
+# 一律不算人名 —— 这是识别精度的第一道闸。
 _COMMON_WORDS = {
+    # 时间/转折/语气副词
     "今天", "昨天", "明天", "此时", "此刻", "突然", "顿时", "然后", "接着",
     "于是", "但是", "然而", "其实", "不过", "因为", "所以", "如果", "虽然",
-    "只见", "听到", "说完", "两人", "三人", "众人", "大家", "自己", "别人",
-    "对方", "声音", "气氛", "空气", "时间", "周围", "四周", "心中", "心里",
-    "脑海", "眼前", "身后", "身旁", "身边", "半晌", "片刻", "许久", "很久",
-    "一时", "这时", "那时", "这里", "那里", "哪里", "什么", "怎么", "为何",
-    "原来", "终于", "依然", "仍然", "依旧", "已经", "曾经", "正在", "刚刚",
-    "刚才", "马上", "立刻", "房间", "教室", "客厅", "门外", "窗外", "屋里",
-    "屋外", "楼上", "楼下", "手中", "口中", "脸上", "头上", "身上", "车里",
-    "嘴里", "一旁", "对面", "前面", "后面", "里面", "外面", "上面", "下面",
-    "远处", "近处", "一眼", "一声", "一步", "半天", "少年", "少女", "男人",
-    "女人", "老头", "老者", "大叔", "阿姨", "孩子", "大人", "老板", "老师",
-    "医生", "警察", "司机", "他们", "她们", "我们", "你们", "咱们", "地点",
+    "只见", "听到", "说完", "原来", "终于", "依然", "仍然", "依旧", "已经",
+    "曾经", "正在", "刚刚", "刚才", "马上", "立刻", "忽然", "果然", "竟然",
+    "居然", "当然", "显然", "始终", "渐渐", "缓缓", "淡淡", "轻轻", "悄悄",
+    "默默", "静静", "慢慢", "匆匆", "微微", "狠狠", "连忙", "急忙", "随即",
+    "一时", "半晌", "片刻", "许久", "很久", "这时", "那时", "半空", "半路",
+    # 代词/泛指
+    "两人", "三人", "四人", "众人", "大家", "自己", "别人", "对方", "人家",
+    "彼此", "他们", "她们", "我们", "你们", "咱们", "这个", "那个", "每个",
+    "某个", "各种", "所有", "全部", "整个", "整片", "其他", "其余", "有的",
+    # 场所/方位/身体/声音（「XX道：」前误提取的高发词）
+    "声音", "话音", "话语", "气氛", "空气", "时间", "周围", "四周", "心中",
+    "心里", "心头", "脑海", "脑中", "眼前", "眼中", "身后", "身旁", "身边",
+    "身前", "面前", "眼里", "怀里", "怀中", "眉头", "嘴角", "脸上", "头上",
+    "身上", "手中", "口中", "嘴里", "车里", "屋里", "屋外", "房间", "教室",
+    "客厅", "门外", "窗外", "楼上", "楼下", "一旁", "对面", "前面", "后面",
+    "里面", "外面", "上面", "下面", "远处", "近处", "地点", "地方", "现场",
+    # 动作/神态（动作句开头误判的高发词）
+    "低头", "抬头", "点头", "摇头", "转身", "回头", "起身", "开口", "沉默",
+    "苦笑", "微笑", "大笑", "冷笑", "一笑", "眨眼", "皱眉", "挑眉", "耸肩",
+    "鼓掌", "深吸", "吐气", "侧身", "弯腰", "站起", "坐下", "蹲下", "跪下",
+    "躺下", "爬起", "离开", "回来", "过来", "出去", "出来", "起来", "上去",
+    "下来", "上前", "逼近", "靠近", "跟着", "带着", "半天", "一眼", "一声",
+    "一步", "一句", "一拳", "一脚", "一剑", "一刀",
+    # 身份泛称
+    "少年", "少女", "男人", "女人", "老头", "老者", "大叔", "阿姨", "孩子",
+    "大人", "老板", "老师", "医生", "警察", "司机", "学生", "青年", "女子",
+    "男子", "女孩", "男孩", "姑娘", "小姐", "太太", "夫人", "老爷", "大爷",
+    "大妈", "大婶", "大妈", "兄弟", "大哥", "大姐", "小弟", "小子", "丫头",
 }
 
 # 性别 / 年龄归类线索（与姓名同段共现时投票）
@@ -143,16 +164,45 @@ _OLD_MALE_HINTS = ("爷爷", "老爷子", "老者", "老头", "伯父", "中年"
                    "大爷", "大叔", "叔叔", "老伯")
 
 STACK_LIMIT = 12          # 角色栈最深保留人数
+# 成为「出场人物」的门槛：至少确认为说话人/动作句主语的次数。
+# 只出现一次的候选大多是「缓缓」「心中一凛」这类漏网误报；
+# 真正有台词的角色一本书里几乎不可能只出现一次。
+MIN_SPEAKER_MENTIONS = 2
+
+# 人名里不该出现的字（真实中文人名基本不含这些虚词/助词）
+_FUNCTION_CHARS = set("着了过的地得吗呢吧啊呀哦嘛么")
+
+# 子串黑名单：候选名里包含这些词就不算人名（心中一凛 / 一片叶子…）。
+# 称谓词（太太/大爷/奶奶/大叔…）**豁免** —— 「老太太」「王大爷」这类
+# 名字本身就是称谓+姓氏，不能因为含「太太」就被拒。
+_HINT_WORDS = (set(_FEMALE_HINTS) | set(_MALE_HINTS)
+               | set(_OLD_FEMALE_HINTS) | set(_OLD_MALE_HINTS))
+_SUBSTR_BLACKLIST = tuple(
+    w for w in list(_COMMON_WORDS) + list(_ADVERBS)
+    if len(w) >= 2 and w not in _HINT_WORDS)
 
 
 def _is_plausible_name(name: str) -> bool:
-    """形状上像人名：2~4 汉字 / 带·的外国名，排除虚词开头与高频词。"""
-    if not name or name in _PRONOUNS or name in _COMMON_WORDS:
+    """形状上像人名：2~4 汉字 / 带·的外国名，排除虚词与高频词。
+
+    精度三道闸：
+      ① 整词命中黑名单（缓缓/低头/心中…）直接排除；
+      ② 候选名**包含**黑名单词（心中一凛、一片叶子）排除；
+      ③ 名字里含助词/虚词字（着了过的地得…）排除。
+    """
+    if not name or name in _PRONOUNS:
         return False
     if not _NAME_RE.match(name):
         return False
     if name[0] in _BAD_NAME_HEAD:
         return False
+    if any(ch in _FUNCTION_CHARS for ch in name):
+        return False
+    if name in _COMMON_WORDS or name in _ADVERBS:
+        return False
+    for w in _SUBSTR_BLACKLIST:
+        if w in name:
+            return False
     # 全部由单字代词/虚词构成的（如「的话」「就是」）直接排除
     if all(ch in "的地得了他她它你我就是也是有着在和与把将被很太" for ch in name):
         return False
@@ -240,12 +290,19 @@ class _Registry:
         self.order = []           # [人名]，按首次登记顺序
         self.gender_votes = {}    # 人名 -> [男票, 女票]
         self.age_votes = {}       # 人名 -> {"old_f": n, "old_m": n}
+        self.speaker_count = {}   # 人名 -> 确认为说话人/动作主语的次数
 
     def register(self, name):
         if name not in self.gender_votes:
             self.gender_votes[name] = [0, 0]
             self.age_votes[name] = {"old_f": 0, "old_m": 0}
+            self.speaker_count[name] = 0
             self.order.append(name)
+
+    def confirm(self, name):
+        """确认为说话人/动作句主语一次（进出场人物清单的频率门槛）。"""
+        if name in self.speaker_count:
+            self.speaker_count[name] += 1
 
     def vote(self, name, context_text):
         """姓名与代词/称谓同段共现 → 给该人物投性别/年龄票。
@@ -313,7 +370,9 @@ class _Registry:
         return "female" if v[1] > v[0] else "male"
 
     def result(self):
-        return [(name, self.category(name)) for name in self.order]
+        """出场人物清单：按首次出场排序，只保留达到频率门槛的人名。"""
+        return [(name, self.category(name)) for name in self.order
+                if self.speaker_count.get(name, 0) >= MIN_SPEAKER_MENTIONS]
 
 
 class _Stack:
@@ -397,21 +456,26 @@ def _maybe_action_name(segment, registry, stack):
     return None
 
 
-def _process_paragraph(pi, para, registry, stack, speakers):
-    """在整段原文上定位引号与说话人，再把说话人映射回切分片段。"""
-    frags = split_sentences(para)
-    if not frags:
-        return
-    # 1) 切分片段在原文中的位置（split_sentences 只是拆分/过滤纯标点片段，
-    #    保留的片段内容与原文逐字一致，可以 find 对齐）
-    frag_spans = []
-    pos = 0
-    for f in frags:
-        idx = para.find(f, pos)
-        if idx < 0:
-            idx = pos
-        frag_spans.append((idx, idx + len(f)))
-        pos = idx + len(f)
+def _process_paragraph(pi, para, registry, stack, speakers, light=False):
+    """在整段原文上定位引号与说话人，再把说话人映射回切分片段。
+
+    light=True（第一遍登记/投票）时只做引号标签与动作句识别，
+    不做切分对齐和说话人表 —— 那部分占大头，留给第二遍。
+    """
+    if not light:
+        frags = split_sentences(para)
+        if not frags:
+            return
+        # 1) 切分片段在原文中的位置（split_sentences 只是拆分/过滤纯标点片段，
+        #    保留的片段内容与原文逐字一致，可以 find 对齐）
+        frag_spans = []
+        pos = 0
+        for f in frags:
+            idx = para.find(f, pos)
+            if idx < 0:
+                idx = pos
+            frag_spans.append((idx, idx + len(f)))
+            pos = idx + len(f)
 
     # 2) 找出全部引号区间，逐个确定说话人（按位置顺序处理，
     #    旁白动作句在遇到引号前先入栈，保证「楚子航点点头，「走吧。」」正确归人）
@@ -423,12 +487,19 @@ def _process_paragraph(pi, para, registry, stack, speakers):
         act = _maybe_action_name(para[cur:o], registry, stack)
         if act:
             touched.append(act)
+            if not light:
+                registry.confirm(act)
         token = _tag_before_quote(para, o)
         if token is None:
             token = _tag_after_quote(para, c)
         spk = _apply_tag(token, registry, stack)
         if spk is not None:
             touched.append(spk)
+            # 频率门槛只在完整遍计数（两遍都计等于门槛减半）。
+            # 代词解析出的说话人也算 —— 「……」她说。是一个人开口的
+            # 真实证据，只靠代词出场的角色同样该进清单。
+            if not light:
+                registry.confirm(spk)
         else:
             # 引号对话没有识别出人名/代词标签 → 沿用栈顶（连续对话规则）
             spk = stack.top()
@@ -441,17 +512,20 @@ def _process_paragraph(pi, para, registry, stack, speakers):
         act = _maybe_action_name(para[cur:], registry, stack)
         if act:
             touched.append(act)
+            if not light:
+                registry.confirm(act)
 
     # 3) 切分片段 → 说话人：与某个引号区间相交（且片段起点在对话结束前）
-    #    的片段用该引号的说话人；其余片段是旁白，不进表。
-    for (fs, fe), frag in zip(frag_spans, frags):
-        spk = None
-        for (o, c), sp in zip(quotes, quote_speakers):
-            if fs < c and fe > o:
-                spk = sp
-                break
-        if spk:
-            speakers[(pi, frag)] = spk
+    #    的片段用该引号的说话人；其余片段是旁白，不进表。（轻量遍跳过）
+    if not light:
+        for (fs, fe), frag in zip(frag_spans, frags):
+            spk = None
+            for (o, c), sp in zip(quotes, quote_speakers):
+                if fs < c and fe > o:
+                    spk = sp
+                    break
+            if spk:
+                speakers[(pi, frag)] = spk
 
     # 4) 性别/年龄投票：本段出现过的人物，用整段文本里的代词/称谓投票
     #    （只投本段出现过的少数人物，避免全书 O(段×人名) 的扫描）
@@ -464,23 +538,34 @@ def analyze(paragraphs):
     """扫描整本书（两遍）。
 
     返回 (characters, speakers)：
-      characters = [(人名, 类别), ...] 按首次出场排序；
+      characters = [(人名, 类别), ...] 按首次出场排序（只含达到
+                   MIN_SPEAKER_MENTIONS 门槛的人物）；
       speakers   = {(段落下标, 切分片段): 说话人名}，旁白片段不进表。
 
     为什么两遍：代词「他说道/她说道」的性别消歧依赖**全书**的投票结果
     （夏弥是女这件事可能到很后面才有「她」的证据）。第一遍只登记人物、
-    收集性别/年龄票；第二遍人物性别已定，再生成最终说话人标注。
+    收集性别/年龄票（轻量：不做切分对齐和说话人表）；第二遍人物性别
+    已定，再生成最终说话人标注。
+
+    性能注意：本函数在后台线程跑，纯 Python 全程持有 GIL ——
+    每几百段 sleep 一下把 CPU 完全让给 UI 线程，避免手机上
+    扫描期间点任何按钮都卡。
     """
+    import time as _time
+
     registry = _Registry()
 
-    # 第一遍：登记 + 投票（说话人结果丢弃）
+    # 第一遍：登记 + 投票（轻量，说话人结果丢弃）
     probe_stack = _Stack(registry)
     probe_speakers = {}
     for pi, para in enumerate(paragraphs):
         try:
-            _process_paragraph(pi, para, registry, probe_stack, probe_speakers)
+            _process_paragraph(pi, para, registry, probe_stack,
+                               probe_speakers, light=True)
         except Exception:
             continue
+        if pi % 400 == 399:
+            _time.sleep(0.001)       # 完全释放 GIL，让 UI 喘口气
 
     # 第二遍：性别已定 → 生成最终逐句说话人
     stack = _Stack(registry)
@@ -491,5 +576,7 @@ def analyze(paragraphs):
         except Exception:
             # 单段解析失败不影响全书：跳过该段（相当于当旁白处理）
             continue
+        if pi % 400 == 399:
+            _time.sleep(0.001)       # 完全释放 GIL，让 UI 喘口气
 
     return registry.result(), speakers

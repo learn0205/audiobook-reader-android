@@ -1581,6 +1581,9 @@ class AudioBookApp(App, WakelockFgMixin):
         paras = list(self._paragraphs)
         if not paras:
             return
+        # 提前告诉用户「没卡死，是在扫描」：大部头在手机上要跑几十秒，
+        # 期间后台线程占 CPU，界面会有可感知的顿挫
+        self._toast("正在识别本书角色…（完成后自动生效，大部头需稍等）")
 
         def _work():
             result = None
