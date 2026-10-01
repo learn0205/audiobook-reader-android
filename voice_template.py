@@ -57,10 +57,29 @@ DEFAULT_SLOTS = {
     "奶奶2":     {"voice": "zh-CN-XiaoyanNeural",  "pitch": -15, "rate": 0.9},
     "奶奶3":     {"voice": "zh-CN-XiaozhenNeural", "pitch": -15, "rate": 0.9},
     "奶奶4":     {"voice": "zh-CN-XiaomengNeural", "pitch": -15, "rate": 0.88},
+    # ---- 童声 ----
+    "童声1":     {"voice": "zh-CN-XiaoshuangNeural", "pitch": 15, "rate": 1.05},
+    "童声2":     {"voice": "zh-CN-XiaoyouNeural",   "pitch": 15, "rate": 1.0},
+    # ---- 少女 ----
+    "少女1":     {"voice": "zh-CN-XiaoyiNeural",   "pitch": 12, "rate": 1.05},
+    "少女2":     {"voice": "zh-CN-XiaomengNeural", "pitch": 10, "rate": 1.0},
+    "少女3":     {"voice": "zh-CN-XiaoyanNeural",  "pitch": 8,  "rate": 1.08},
+    "少女4":     {"voice": "zh-CN-XiaoyuNeural",   "pitch": 12, "rate": 0.95},
+    # ---- 港台腔 ----
+    "港台1":     {"voice": "zh-HK-HiuMaanNeural",  "pitch": 0,  "rate": 1.0},
+    "港台2":     {"voice": "zh-HK-HiuGaaiNeural",  "pitch": 0,  "rate": 1.0},
+    "港台3":     {"voice": "zh-HK-WanLungNeural",  "pitch": 0,  "rate": 1.0},
+    "港台4":     {"voice": "zh-TW-HsiaoChenNeural","pitch": 0,  "rate": 1.0},
+    "港台5":     {"voice": "zh-TW-YunJheNeural",   "pitch": 0,  "rate": 1.0},
+    "港台6":     {"voice": "zh-TW-HsiaoYuNeural",  "pitch": 5,  "rate": 1.0},
+    # ---- 方言 ----
+    "方言1":     {"voice": "zh-CN-liaoning-XiaobeiNeural", "pitch": 0, "rate": 1.0},
+    "方言2":     {"voice": "zh-CN-shaanxi-XiaoniNeural",   "pitch": 0, "rate": 1.0},
 }
 
 # 类别名 → 该类的编号清单（保持声明顺序，自动映射时按序取用）
-CATEGORY_ORDER = ("男角色", "中年叔叔", "女角色", "奶奶")
+CATEGORY_ORDER = ("男角色", "中年叔叔", "女角色", "奶奶",
+                  "童声", "少女", "港台", "方言")
 
 # 常见 Edge 中文音色的短名（FriendlyName 太长，界面上显示短名更好认）
 VOICE_FRIENDLY = {
@@ -95,6 +114,10 @@ VOICE_FRIENDLY = {
     "zh-HK-WanLungNeural": "雲龍(粤)",
     "zh-TW-HsiaoChenNeural": "曉臻(台)",
     "zh-TW-YunJheNeural": "雲哲(台)",
+    "zh-TW-HsiaoYuNeural": "曉雨(台)",
+    "zh-HK-HiuGaaiNeural": "曉佳(粤)",
+    "zh-CN-liaoning-XiaobeiNeural": "晓北(东北)",
+    "zh-CN-shaanxi-XiaoniNeural": "晓妮(陕西)",
 }
 
 
