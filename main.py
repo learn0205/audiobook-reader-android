@@ -52,6 +52,10 @@ from book_parser import load_book as parse_book_file
 from config_manager import ConfigManager
 from app_diag import diag, _DIAG, _CRASH, _record_crash, _install_crash_handlers
 from app_wakelock_fg import WakelockFgMixin
+# ---- 多角色朗读（新增模块，全部只增不改）----
+import role_config
+import role_parser
+from voice_template import VOICE_FRIENDLY, VoiceTemplate, voice_friendly
 # ⚠️ STATE_STOPPED 也必须导入：_on_state 里用它决定「是否关闭前台服务」。
 #    漏了它会抛 NameError，而异常从按钮回调冒出 → Kivy 重新抛出 → **一点暂停就闪退**。
 from tts_android import STATE_PAUSED, STATE_PLAYING, STATE_STOPPED
@@ -164,7 +168,8 @@ KV = """
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(10)]
+            # 圆角与目录章节行（ChapterRow）一致，全 app 按钮统一观感
+            radius: [dp(6)]
 
 <ABPrimaryButton>:
     background_color: app.theme_primary
@@ -208,7 +213,7 @@ KV = """
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(10)]
+            radius: [dp(6)]
 
 # 正文容器：背景随主题（与按钮同一绑定路径，设备上已验证可靠；
 # 之前用 python self.bind 回调在设备上没有生效）
@@ -229,7 +234,7 @@ KV = """
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(10)]
+            radius: [dp(6)]
 
 <Slider>:
     # 滑块加大，手机上更好按
@@ -474,6 +479,15 @@ class AudioBookApp(App, WakelockFgMixin):
         self._shown_errors = set()  # 已提示过的错误，避免连续失败时刷屏
         self._font_event = None     # 字号刷新防抖用
 
+        # ---- 多角色朗读（人名识别 + 全局音色模板 + 单书映射）----
+        self._voice_template = None   # 全局音色模板（build 时创建）
+        self._role_map = None         # 本书的人名↔编号映射（role_config.RoleMap）
+        self._role_speakers = {}      # {(段落, 句子): 说话人}（role_parser 扫描结果）
+        self._role_detected = []      # [(人名, 类别)] 最近一次识别结果（面板展示）
+        self._role_scan_version = 0   # 扫描版本号：换书/重识别后作废旧线程结果
+        self._role_scan_force_new = False  # 重新识别时忽略已有映射文件
+        self._role_scan_pending = None     # 后台线程扫完暂存，由 _tick 主线程取用
+
         # ---- 朗读推进兜底时钟（独立于 Kivy 逐帧时钟，熄屏也能跑） ----
         self._tick_running = False
         self._tick_thread = None
@@ -571,6 +585,8 @@ class AudioBookApp(App, WakelockFgMixin):
         # 配置与语音引擎都放在应用私有目录（安卓上必然可写）
         cfg_path = os.path.join(self.user_data_dir, "config.json")
         self._config = ConfigManager(cfg_path)
+        # 全局音色模板（多角色朗读；独立于 config.json，所有书共用）
+        self._voice_template = VoiceTemplate(self.user_data_dir)
         self.reader_font = float(self._config.get("font_size", 15))
         self.line_height = max(1.0, min(2.0, float(self._config.get("line_height", 1.0))))
         self.theme = "light" if self._config.get("theme", "dark") == "light" else "dark"
@@ -1011,9 +1027,14 @@ class AudioBookApp(App, WakelockFgMixin):
         popup.open()
 
     def _remove_history_item(self, key, popup):
-        """删除一条历史（连同该书的断点/书签）。当前书在列表里禁用删除。"""
+        """删除一条历史（连同该书的断点/书签）。当前书在列表里禁用删除。
+
+        删除小说时同步删除该书的人名映射配置（不弹确认框）；
+        全局音色清单模板与全局语速音调设置不受影响。
+        """
         self._config.remove_book_data(key)
         self._config.save()
+        role_config.delete_map(self.user_data_dir, key)
         if popup is not None:
             popup.dismiss()
         Clock.schedule_once(lambda _dt: self._open_history_popup(), 0)
@@ -1024,6 +1045,9 @@ class AudioBookApp(App, WakelockFgMixin):
         因此清空后列表里可能仍显示当前书——这是有意设计。"""
         self._config.clear_book_data(keep_key=self._book_key)
         self._config.save()
+        # 同步清掉各书的人名映射配置（当前书保留）；全局模板不受影响
+        role_config.delete_all_maps(self.user_data_dir,
+                                    keep_book_key=self._book_key)
         if popup is not None:
             popup.dismiss()
         Clock.schedule_once(lambda _dt: self._open_history_popup(), 0)
@@ -1196,6 +1220,16 @@ class AudioBookApp(App, WakelockFgMixin):
         self._offsets, self._total_chars = offsets, total
         self._book_path = doc.path
         self._book_key = ConfigManager.book_key(doc.path)
+
+        # ---- 多角色朗读：换书即作废上一本的角色上下文 ----
+        # 先摘掉逐句音色钩子（找不到映射/识别完成前按全局单音色朗读），
+        # 再后台扫描全书识别角色；完成后加载或自动生成映射（见 _apply_role_scan）。
+        self._role_map = None
+        self._role_speakers = {}
+        self._role_detected = []
+        self._role_scan_force_new = False
+        self._engine.set_voice_resolver(None)
+        self._scan_roles_async()
         self._chapters = [(t, s) for t, s in doc.chapters
                           if 0 <= s < len(doc.paragraphs)]
 
@@ -1524,6 +1558,403 @@ class AudioBookApp(App, WakelockFgMixin):
             box.add_widget(_action("＋ 在此处添加书签",
                                    lambda: self.add_bookmark(index)))
         box.add_widget(_action("书签列表", self.show_bookmarks))
+        popup.content = box
+        popup.open()
+
+    # ============================================================
+    #    多角色朗读：识别 / 映射 / 角色管理 / 音色模板（新增模块接入层）
+    # ============================================================
+    def _multi_role_enabled(self):
+        """多角色总开关（设置里可切；默认开）。"""
+        return bool(self._config.get("multi_role", True))
+
+    def _scan_roles_async(self, force_new=False):
+        """后台线程扫描全书：识别人物 + 逐句说话人（不阻塞界面）。
+
+        几百万字的书正则扫描要数秒，绝不能在主线程做。
+        force_new=True（「重新识别角色」）时忽略已有映射文件，
+        按出场顺序重新自动分配编号。
+        """
+        version = self._role_scan_version + 1
+        self._role_scan_version = version
+        self._role_scan_force_new = force_new
+        paras = list(self._paragraphs)
+        if not paras:
+            return
+
+        def _work():
+            result = None
+            try:
+                result = role_parser.analyze(paras)
+            except Exception:
+                result = None          # 解析失败 → 调用方降级为单音色
+            # ⚠️ 不能从后台线程 Clock.schedule_once（本项目实测会丢回调，
+            #    见 tts_engine._post_to_main 的注释）；暂存结果，由 _tick
+            #    每 0.2 秒在主线程取用（_tick 恰好负责各类定时回调）。
+            self._role_scan_pending = (version, result, force_new)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _poll_role_scan(self):
+        """_tick 调用（主线程）：后台扫描完成 → 应用结果。"""
+        pending = self._role_scan_pending
+        if pending is None:
+            return
+        self._role_scan_pending = None
+        try:
+            self._apply_role_scan(*pending)
+        except Exception as err:
+            self._on_error("角色映射应用失败：%s" % err)
+
+    def _apply_role_scan(self, version, result, force_new=False):
+        """扫描完成（已回 Kivy 主线程）：加载/生成映射并挂上逐句音色钩子。"""
+        if version != self._role_scan_version:
+            return                      # 期间换书/重新识别过了 → 丢弃旧结果
+        if result is None:
+            # 解析失败自动降级：不设钩子，整本书按全局单音色朗读
+            self._role_speakers = {}
+            self._role_map = None
+            self._engine.set_voice_resolver(None)
+            self._on_error("角色识别失败，本书已降级为单音色朗读")
+            return
+        characters, speakers = result
+        self._role_detected = characters
+        self._role_speakers = speakers or {}
+
+        # 历史书籍打开：自动查找该书的映射配置文件；找到就加载，
+        # 找不到（或点了「重新识别」）才重新识别并自动生成新映射
+        rm = None if force_new else role_config.load_map(
+            self.user_data_dir, self._book_key)
+        if rm is None:
+            rm = role_config.auto_map(self._book_key, characters,
+                                      self._voice_template)
+            role_config.save_map(self.user_data_dir, rm)
+        self._role_map = rm
+        if self._multi_role_enabled():
+            self._engine.set_voice_resolver(self._role_voice_resolver)
+        if characters:
+            self._toast("已识别 %d 个角色，多角色配音就绪" % len(characters))
+
+    def _role_voice_resolver(self, para_index, sentence):
+        """引擎逐句回调（Edge 合成子线程，绝不能碰 UI）。
+
+        这句是谁在说 → 该人物的声音参数 (voice, rate倍率, pitch Hz)；
+        旁白 / 未绑定编号的人物返回 None → 引擎按全局音色读。
+        """
+        try:
+            if not self._multi_role_enabled() or self._role_map is None:
+                return None
+            name = self._role_speakers.get((para_index, sentence))
+            if not name:
+                return None
+            return role_config.RoleMap.entry_params(
+                self._role_map.get(name), self._voice_template)
+        except Exception:
+            return None
+
+    def _multi_role_btn_text(self):
+        return "已开启" if self._multi_role_enabled() else "已关闭"
+
+    def _toggle_multi_role(self, btn=None):
+        enabled = not self._multi_role_enabled()
+        self._config.set("multi_role", enabled)
+        self._config.save()
+        self._apply_multi_role_setting()
+        if btn is not None:
+            btn.text = self._multi_role_btn_text()
+
+    def _apply_multi_role_setting(self):
+        """开关变化后重挂/摘掉逐句音色钩子（下一句立刻生效）。"""
+        if self._multi_role_enabled() and self._role_map is not None:
+            self._engine.set_voice_resolver(self._role_voice_resolver)
+        else:
+            self._engine.set_voice_resolver(None)
+
+    # ---------------- 角色管理面板（本书） ----------------
+    def _show_role_panel(self, parent_popup=None):
+        """本书角色列表：人名 → 编号（模板/自定义），可换绑 / 覆盖 / 重置。"""
+        if parent_popup is not None:
+            parent_popup.dismiss()
+        if self._role_map is None or not self._role_map.names():
+            self._toast("还没有识别到本书角色（打开书籍后自动识别）")
+            return
+        popup = Popup(title="角色管理（本书）", size_hint=(0.94, 0.82))
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(10))
+        scroll = self._make_scroll()
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4))
+        inner.bind(minimum_height=inner.setter("height"))
+
+        def _reopen(*_):
+            Clock.schedule_once(lambda _dt: self._show_role_panel(), 0)
+
+        for entry in list(self._role_map.roles):
+            name = entry.get("name", "")
+            btn = ABButton(
+                text="%s　→　%s" % (name, role_config.describe_entry(
+                    entry, self._voice_template)),
+                size_hint_y=None, height=dp(48), halign="left",
+                valign="middle", font_size="12sp")
+            btn.bind(size=lambda w, *_: setattr(
+                w, "text_size", (w.width - dp(16), None)))
+            btn.bind(on_release=lambda _b, n=name: self._open_role_menu(n))
+            inner.add_widget(btn)
+        scroll.add_widget(inner)
+        box.add_widget(scroll)
+
+        bottom = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        btn_rescan = ABButton(text="重新识别角色", font_size="12sp")
+        btn_rescan.bind(on_release=lambda *_: self._reidentify_roles(popup))
+        btn_close = ABPrimaryButton(text="关闭", font_size="12sp")
+        btn_close.bind(on_release=lambda *_: popup.dismiss())
+        bottom.add_widget(btn_rescan)
+        bottom.add_widget(btn_close)
+        box.add_widget(bottom)
+        popup.content = box
+        popup.open()
+
+    def _open_role_menu(self, name):
+        """单个人物的操作菜单：换绑编号 / 自定义参数 / 重置。"""
+        popup = Popup(title="角色：%s" % name, size_hint=(0.9, None),
+                      height=dp(340))
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(10))
+
+        def _action(text, callback):
+            btn = ABButton(text=text, size_hint_y=None, height=dp(46),
+                           font_size="13sp")
+
+            def _run(*_):
+                popup.dismiss()
+                callback()
+            btn.bind(on_release=_run)
+            return btn
+
+        box.add_widget(_action("↔ 换绑音色编号（只换人名绑定）",
+                               lambda: self._edit_role_binding(name)))
+        box.add_widget(_action("✎ 自定义音色/语速/音调（不再跟随模板）",
+                               lambda: self._edit_role_voice(name)))
+        box.add_widget(_action("⟲ 重置为模板参数",
+                               lambda: self._reset_role(name)))
+        btn_back = ABButton(text="返回角色列表", size_hint_y=None, height=dp(46))
+        btn_back.bind(on_release=lambda *_: (popup.dismiss(),
+                                             self._show_role_panel()))
+        box.add_widget(btn_back)
+        popup.content = box
+        popup.open()
+
+    def _save_role_map(self):
+        if self._role_map is not None:
+            role_config.save_map(self.user_data_dir, self._role_map)
+
+    def _edit_role_binding(self, name):
+        """换绑编号：只改「人名 → 编号」的映射，编号底层音色参数不动。"""
+        if self._role_map is None:
+            return
+        entry = self._role_map.get(name)
+        current = entry.get("slot") if entry else ""
+        slot_list = list(self._voice_template.all_slots().keys())
+        popup = Popup(title="为「%s」选择编号（当前：%s）"
+                      % (name, current or "未绑定"), size_hint=(0.9, 0.75))
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(10))
+        box.add_widget(self._auto_label(
+            "选择编号后，这个人物就用该编号模板里的音色；"
+            "其他小说不受影响。", font_size="12sp", min_height=dp(40)))
+        spinner = Spinner(text=current or "点击选择…", values=slot_list,
+                          size_hint_y=None, height=dp(46))
+
+        def _pick(_s, slot_id):
+            if slot_id in slot_list:
+                self._role_map.set_slot(name, slot_id)
+                self._save_role_map()
+                popup.dismiss()
+                self._toast("「%s」已绑定 %s（下一句起生效）" % (name, slot_id))
+                self._show_role_panel()
+        spinner.bind(text=_pick)
+        box.add_widget(self._safe_text(spinner, min_height=dp(46)))
+        btn_cancel = ABButton(text="取消", size_hint_y=None, height=dp(46))
+        btn_cancel.bind(on_release=lambda *_: (popup.dismiss(),
+                                               self._show_role_panel()))
+        box.add_widget(btn_cancel)
+        popup.content = box
+        popup.open()
+
+    def _edit_role_voice(self, name):
+        """给单个人物覆盖自定义音色/语速/音调（之后不跟随全局模板）。"""
+        if self._role_map is None:
+            return
+        entry = self._role_map.get(name)
+        custom = entry.get("custom") if entry else None
+        base = self._voice_template.get(entry.get("slot")) if entry else None
+        ref = custom or base or {"voice": "", "pitch": 0, "rate": 1.0}
+
+        def _save(voice, pitch, rate):
+            self._role_map.set_custom(name, voice, pitch, rate)
+            self._save_role_map()
+            self._toast("「%s」已自定义音色，不再跟随模板" % name)
+            self._show_role_panel()
+        self._voice_param_editor(
+            title="自定义：%s" % name, cur_voice=ref["voice"],
+            cur_pitch=ref["pitch"], cur_rate=ref["rate"], on_save=_save)
+
+    def _reset_role(self, name):
+        """一键重置：清掉自定义参数，恢复跟随模板编号自带参数。"""
+        if self._role_map is None:
+            return
+        self._role_map.reset_custom(name)
+        self._save_role_map()
+        self._toast("「%s」已重置为模板参数" % name)
+        self._show_role_panel()
+
+    def _reidentify_roles(self, popup=None):
+        """重新识别角色：忽略旧映射，按出场顺序重新自动分配编号。"""
+        if popup is not None:
+            popup.dismiss()
+        if not self._paragraphs:
+            return
+        self._toast("正在重新识别角色……")
+        self._scan_roles_async(force_new=True)
+
+    # ---------------- 全局音色模板面板 ----------------
+    def _show_template_panel(self, parent_popup=None):
+        """全局模板编辑：每个编号的 Edge 音色/音调/语速，改完全书同步。"""
+        if parent_popup is not None:
+            parent_popup.dismiss()
+        popup = Popup(title="音色模板（全局 · 所有小说共用）",
+                      size_hint=(0.94, 0.85))
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(10))
+        box.add_widget(self._auto_label(
+            "修改编号参数后，所有小说里绑定该编号的人物立即同步；"
+            "已单独自定义的角色不受影响。",
+            font_size="12sp", min_height=dp(40)))
+        scroll = self._make_scroll()
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(3))
+        inner.bind(minimum_height=inner.setter("height"))
+        for slot_id, params in self._voice_template.all_slots().items():
+            btn = ABButton(
+                text="%s：%s · 调%+dHz · %.2fx" % (
+                    slot_id, voice_friendly(params["voice"]),
+                    int(params["pitch"]), float(params["rate"])),
+                size_hint_y=None, height=dp(42), halign="left",
+                valign="middle", font_size="12sp")
+            btn.bind(size=lambda w, *_: setattr(
+                w, "text_size", (w.width - dp(16), None)))
+            btn.bind(on_release=lambda _b, sid=slot_id:
+                     self._edit_template_slot(sid))
+            inner.add_widget(btn)
+        scroll.add_widget(inner)
+        box.add_widget(scroll)
+
+        bottom = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        btn_reset = ABDangerButton(text="全部恢复默认", font_size="12sp")
+        btn_reset.bind(on_release=lambda *_: (
+            self._voice_template.reset_all(),
+            popup.dismiss(), self._show_template_panel(),
+            self._toast("模板已全部恢复默认")))
+        btn_close = ABPrimaryButton(text="关闭", font_size="12sp")
+        btn_close.bind(on_release=lambda *_: popup.dismiss())
+        bottom.add_widget(btn_reset)
+        bottom.add_widget(btn_close)
+        box.add_widget(bottom)
+        popup.content = box
+        popup.open()
+
+    def _edit_template_slot(self, slot_id):
+        """编辑一个模板编号的 Edge 音色 / 音调 / 语速（保存即全局生效）。"""
+        params = self._voice_template.get(slot_id)
+        if not params:
+            return
+
+        def _save(voice, pitch, rate):
+            self._voice_template.set_slot(slot_id, voice, pitch, rate)
+            self._toast("模板「%s」已更新，绑定该编号的角色全部同步"
+                        "（自定义角色不受影响）" % slot_id)
+            self._show_template_panel()
+
+        def _reset():
+            self._voice_template.reset_slot(slot_id)
+            self._toast("模板「%s」已恢复默认" % slot_id)
+            self._show_template_panel()
+        self._voice_param_editor(
+            title="编辑模板：%s" % slot_id, cur_voice=params["voice"],
+            cur_pitch=params["pitch"], cur_rate=params["rate"],
+            on_save=_save, on_reset=_reset)
+
+    # ---------------- 音色参数编辑器（角色/模板共用） ----------------
+    def _edge_voice_choices(self, current=""):
+        """Edge 音色下拉选项：返回 (标签列表, 标签→ShortName 映射)。
+
+        优先用运行时拉到的 Edge 音色列表；还没拉到（网络慢/失败）时
+        退回内置已知清单，保证面板永远可用。
+        """
+        names = []
+        for v in getattr(self, "_voice_list", []):
+            n = v.get("name")
+            if v.get("source") == "edge" and n and n not in names:
+                names.append(n)
+        if not names:
+            names = list(VOICE_FRIENDLY.keys())
+        if current and current not in names:
+            names.insert(0, current)
+        labels, mapping, taken = [], {}, set()
+        for n in names:
+            lbl = voice_friendly(n)
+            while lbl in taken:
+                lbl += "·"
+            taken.add(lbl)
+            labels.append(lbl)
+            mapping[lbl] = n
+        return labels, mapping
+
+    def _voice_param_editor(self, title, cur_voice="", cur_pitch=0,
+                            cur_rate=1.0, on_save=None, on_reset=None):
+        """弹窗编辑一组「音色 + 音调(Hz) + 语速(倍率)」。
+
+        on_save(voice, pitch, rate) 保存回调；on_reset 提供时显示
+        「恢复默认」按钮。
+        """
+        labels, mapping = self._edge_voice_choices(cur_voice)
+        cur_label = next((l for l, n in mapping.items() if n == cur_voice),
+                         labels[0] if labels else "无可用音色")
+        state = {"voice": cur_voice, "pitch": int(cur_pitch),
+                 "rate": float(cur_rate)}
+
+        popup = Popup(title=title, size_hint=(0.92, None), height=dp(436))
+        box = BoxLayout(orientation="vertical", spacing=_popup_spacing(),
+                        padding=[_popup_pad_x(), _popup_pad_y(),
+                                 _popup_pad_x(), _popup_pad_y()])
+
+        box.add_widget(self._auto_label("Edge 音色", font_size="13sp",
+                                        min_height=dp(22)))
+        spinner = Spinner(text=cur_label, values=labels or [cur_label],
+                          size_hint_y=None, height=dp(44))
+        spinner.bind(text=lambda _s, lbl: state.update(
+            voice=mapping.get(lbl, state["voice"])))
+        box.add_widget(self._safe_text(spinner, min_height=dp(44)))
+
+        box.add_widget(self._slider_row(
+            "音调(Hz)", -50, 50, state["pitch"],
+            lambda v: state.update(pitch=int(v))))
+        box.add_widget(self._slider_row(
+            "语速(倍)", 50, 200, int(round(state["rate"] * 100)),
+            lambda v: state.update(rate=v / 100.0),
+            fmt=lambda v: "%.2fx" % (v / 100.0)))
+
+        btns = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        if on_reset is not None:
+            btn_reset = ABButton(text="恢复默认", font_size="12sp")
+            btn_reset.bind(on_release=lambda *_: (popup.dismiss(), on_reset()))
+            btns.add_widget(btn_reset)
+        btn_cancel = ABButton(text="取消", font_size="12sp")
+        btn_cancel.bind(on_release=lambda *_: popup.dismiss())
+        btns.add_widget(btn_cancel)
+        btn_ok = ABPrimaryButton(text="保存", font_size="12sp")
+
+        def _ok(*_):
+            popup.dismiss()
+            if on_save is not None:
+                on_save(state["voice"], state["pitch"], state["rate"])
+        btn_ok.bind(on_release=_ok)
+        btns.add_widget(btn_ok)
+        box.add_widget(btns)
         popup.content = box
         popup.open()
 
@@ -2029,6 +2460,7 @@ class AudioBookApp(App, WakelockFgMixin):
                                     % _gap)
         self._last_tick_wall = _now
         self._tick_count += 1
+        self._poll_role_scan()
         self._engine.poll_advance()
 
         if self._engine.get_state() == STATE_PLAYING:
@@ -2695,6 +3127,28 @@ class AudioBookApp(App, WakelockFgMixin):
                                         self._on_line_height,
                                         fmt=lambda v: "%.1fx" % (v / 10.0)))
 
+        # ---- 多角色朗读（开关收进一行，说明见下方按钮文字本身）----
+        multi_row = BoxLayout(size_hint_y=None, spacing=dp(8))
+        multi_row.add_widget(self._auto_label("多角色朗读（对话按人物分声）",
+                                              font_size="13sp",
+                                              min_height=dp(24)))
+        btn_multi = ABButton(text=self._multi_role_btn_text(),
+                             size_hint_x=None, width=dp(96))
+        btn_multi.bind(on_release=lambda *_: self._toggle_multi_role(btn_multi))
+        self._clip_text(btn_multi)
+        multi_row.add_widget(btn_multi)
+        box.add_widget(self._auto_row(multi_row, dp(46)))
+
+        btn_roles = ABButton(text="角色管理（本书 · 人名绑定音色编号）",
+                             size_hint_y=None, height=dp(44))
+        btn_roles.bind(on_release=lambda *_: self._show_role_panel(popup))
+        box.add_widget(self._safe_text(btn_roles, min_height=dp(44)))
+
+        btn_tpl = ABButton(text="音色模板（全局 · 编辑各编号音色参数）",
+                           size_hint_y=None, height=dp(44))
+        btn_tpl.bind(on_release=lambda *_: self._show_template_panel(popup))
+        box.add_widget(self._safe_text(btn_tpl, min_height=dp(44)))
+
         # ---- 主题（深色 / 浅色，点击即时切换并记忆）----
         btn_theme = ABButton(
             text=("当前：浅色（点按切换为深色）" if self.theme == "light"
@@ -2775,24 +3229,9 @@ class AudioBookApp(App, WakelockFgMixin):
                             height=dp(44))
         btn_auto.bind(on_release=lambda *_: self._open_autostart_settings())
         box.add_widget(self._safe_text(btn_auto, min_height=dp(44)))
-        # 说明：实测有 ROM 的「自启动列表」里根本没有本应用 —— 那种列表只列注册过
-        # 开机启动（BOOT_COMPLETED）的应用，本应用没有这类组件，属正常。
-        # 熄屏不被冻结真正要靠的是上面那一项「省电白名单」。
-        box.add_widget(self._auto_label(
-            "※ 熄屏后不被冻结靠的是上面的「省电白名单」；"
-            "自启动列表里没有本应用属正常（本应用没有开机启动组件）。",
-            font_size="11sp", min_height=dp(34), halign="left"))
 
-        # 主界面去掉了停止键（播放键改成暂停/继续切换），
-        # 停止功能放这里，需要时还能用。
-        btn_stop = ABButton(text="停止朗读", size_hint_y=None, height=dp(44))
-        def _do_stop(*_):
-            popup.dismiss()
-            self._engine.stop()
-            self._save_position()
-            self._toast("已停止朗读")
-        btn_stop.bind(on_release=_do_stop)
-        box.add_widget(self._safe_text(btn_stop, min_height=dp(44)))
+        # 主界面播放键已含暂停/继续切换，不再单独放「停止朗读」；
+        # 需要彻底停止时可切后台后由系统回收，或用定时休眠。
 
         # ---- 历史播放书籍 ----
         btn_hist = ABButton(text="历史播放书籍", size_hint_y=None, height=dp(44))

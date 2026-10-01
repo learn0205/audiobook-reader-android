@@ -156,6 +156,10 @@ class EdgeTTS:
         self._pitch = 0
         self._intonation = True
         self._voice_name = ""
+        # 多角色朗读钩子：main.py 注入 fn(para_index, sentence_text) -> (voice, rate倍率, pitch Hz)
+        # 或 None。返回 None 表示这句没有角色绑定（旁白/未识别）→ 用全局音色；
+        # 整个钩子为 None 或解析抛异常时自动退回全局单音色（解析失败降级）。
+        self._voice_resolver = None
 
         # ---- 语速校准（用于估算时长） ----
         self._cps = 4.2
@@ -267,7 +271,8 @@ class EdgeTTS:
         self._stop_player()
         try:
             if self._cache_dir and self._index < len(self._sentences):
-                bad = self._cache_path(self._sentences[self._index][1])
+                bad = self._cache_path(self._sentences[self._index][1],
+                                       params=self._voice_params_for(self._index))
                 if os.path.exists(bad):
                     os.remove(bad)
         except Exception:
@@ -358,6 +363,41 @@ class EdgeTTS:
 
     def set_voice(self, name):
         self._voice_name = str(name)
+
+    # ==================== 多角色逐句音色 ====================
+    def set_voice_resolver(self, fn):
+        """注入「(段落下标, 句子文本) → (voice, rate倍率, pitch Hz)」解析器。
+
+        fn 返回 None 或抛异常都视为「这句按全局音色读」；fn 本身为 None
+        则彻底回到单音色模式（系统 TTS 后端不支持多角色，本来就不设钩子）。
+        """
+        self._voice_resolver = fn
+
+    def _voice_params_for(self, sent_index):
+        """某一句最终生效的合成参数 (voice, rate字符串, pitch字符串, volume)。
+
+        无钩子 / 钩子返回 None / 钩子抛异常 → 全局参数（原行为，自动降级）。
+        """
+        voice = self._voice_name
+        rate, pitch, volume = self._synth_params()
+        try:
+            resolver = self._voice_resolver
+            if resolver is not None and self._sentences:
+                idx = max(0, min(int(sent_index), len(self._sentences) - 1))
+                para_index, sentence = self._sentences[idx]
+                r = resolver(para_index, sentence)
+                if r:
+                    v, mult, phz = r
+                    if v:
+                        voice = str(v)
+                    mult = max(0.5, min(2.0, float(mult)))
+                    phz = max(-50, min(50, int(phz)))
+                    rate = "%+d%%" % round((mult - 1.0) * 100)
+                    pitch = "%+dHz" % phz
+        except Exception:
+            voice = self._voice_name
+            rate, pitch, volume = self._synth_params()
+        return voice, rate, pitch, volume
 
     # ==================== 播放控制 ====================
     def play(self, para_index=None):
@@ -521,7 +561,7 @@ class EdgeTTS:
         # → edge_tts_client 里 su.escape(tuple) 抛
         #   "'tuple' object has no attribute 'replace'"
         # → 表现为「选中 Edge 音色提示合成失败」，而且**所有 Edge 音色都失败**。
-        args = (sentence, gen)
+        args = (self._index, sentence, gen)
         self._synth_thread = threading.Thread(
             target=self._synthesize_and_play, args=args, daemon=True)
         self._synth_thread.start()
@@ -536,7 +576,7 @@ class EdgeTTS:
         """把 app 的 speed/pitch 档位换算成 Edge 的 rate/pitch/volume 字符串。"""
         # Edge rate 范围约 -50%~+100%；pitch 档位 -10~+10 映射到 ±50Hz
         # （Edge 支持约 ±100Hz，取一半更自然、不刺耳）
-        rate = "+%d%%" % round((self._speed - 1.0) * 100)
+        rate = "%+d%%" % round((self._speed - 1.0) * 100)
         pitch = "%+dHz" % (self._pitch * 5)
         volume = "+0%"
         return rate, pitch, volume
@@ -545,24 +585,32 @@ class EdgeTTS:
         rate, pitch, volume = self._synth_params()
         return sentence, rate, pitch, volume
 
-    def _cache_path(self, sentence):
-        rate, pitch, volume = self._synth_params()
+    def _cache_path(self, sentence, params=None):
+        """句子缓存文件路径。params=(voice, rate, pitch, volume) 时按该句
+        实际参数入键（不同角色的同一句话是不同的 mp3）；None 时用全局参数。"""
+        if params is None:
+            voice = self._voice_name
+            rate, pitch, volume = self._synth_params()
+        else:
+            voice, rate, pitch, volume = params
         key = hashlib.md5(
-            ("%s|%s|%s|%s|%s" % (self._voice_name, sentence, rate, pitch, volume)
+            ("%s|%s|%s|%s|%s" % (voice, sentence, rate, pitch, volume)
              ).encode("utf-8")).hexdigest()
         return os.path.join(self._cache_dir or ".", key + ".mp3")
 
-    def _synthesize_and_play(self, sentence, generation):
+    def _synthesize_and_play(self, sent_index, sentence, generation):
         if generation != self._generation:
             return
         try:
             import edge_tts_client
-            text, rate, pitch, volume = self._synth_text_for(sentence)
-            path = self._cache_path(sentence)
+            # 多角色：这句用说话人自己的音色/语速/音调合成（无绑定则全局参数）
+            params = self._voice_params_for(sent_index)
+            voice, rate, pitch, volume = params
+            path = self._cache_path(sentence, params=params)
             # 命中缓存则跳过网络合成
             if not (self._cache_dir and os.path.exists(path)):
                 edge_tts_client.synthesize_to_file(
-                    text, self._voice_name, path, rate=rate, pitch=pitch, volume=volume)
+                    sentence, voice, path, rate=rate, pitch=pitch, volume=volume)
                 self._prune_cache(keep_path=path)
             if generation != self._generation:
                 return
@@ -732,10 +780,10 @@ class EdgeTTS:
                 import edge_tts_client
                 if generation != self._generation:
                     return
-                text, rate, pitch, volume = self._synth_text_for(sentence)
+                params = self._voice_params_for(idx)
+                voice, rate, pitch, volume = params
                 edge_tts_client.synthesize_to_file(
-                    text, self._voice_name, path,
-                    rate=rate, pitch=pitch, volume=volume)
+                    sentence, voice, path, rate=rate, pitch=pitch, volume=volume)
                 self._prune_cache(keep_path=path)
             except Exception:
                 pass
@@ -751,7 +799,7 @@ class EdgeTTS:
             sentence = self._sentences[idx][1]
             if not sentence.strip():
                 continue
-            path = self._cache_path(sentence)
+            path = self._cache_path(sentence, params=self._voice_params_for(idx))
             if os.path.exists(path):
                 continue
             key = os.path.basename(path)
@@ -864,6 +912,8 @@ class ReaderTTS:
         self._position = (0, 0)           # (段落, 字符) 切换后端时用于恢复
         self._voice_name = ""
         self._voice_source = "android"
+        # 多角色逐句音色解析器（main.py 注入；仅 Edge 后端支持多角色）
+        self._voice_resolver = None
         self._edge_voices = []             # Edge 音色缓存（网络拉取后填充）
         self._merged_voices = []           # 合并后的音色列表（供 UI）
 
@@ -1012,6 +1062,8 @@ class ReaderTTS:
             self._edge.set_speed(self._android._speed)
             self._edge.set_pitch(self._android._pitch)
             self._edge.set_intonation(self._android._intonation)
+            self._edge.set_voice(self._voice_name)
+            self._edge.set_voice_resolver(self._voice_resolver)
             self._edge.load(self._paragraphs)
         return self._edge
 
@@ -1051,6 +1103,16 @@ class ReaderTTS:
         if src != self._active:
             self._switch_backend(src)
         self._backend().set_voice(name)
+
+    def set_voice_resolver(self, fn):
+        """注入多角色逐句音色解析器（仅 Edge 后端消费；系统引擎忽略）。
+
+        切换到 Edge 后端时由 _ensure_edge 带过去，因此先切后端再注入/
+        先注入再切后端都能生效。
+        """
+        self._voice_resolver = fn
+        if self._edge is not None:
+            self._edge.set_voice_resolver(fn)
 
     def _voice_source_of(self, name):
         for v in self._merged_voices:
