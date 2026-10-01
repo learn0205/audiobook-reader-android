@@ -37,8 +37,11 @@ def section(title):
 
 # ---------------------------------------------------------------------------
 def test_role_parser():
+    import role_parser as rp
     from role_parser import analyze
     from tts_android import split_sentences
+    # 小样本语料达不到真书的频率门槛，测试时放宽到 2
+    rp.MIN_SPEAKER_MENTIONS = 2
 
     def spk(speakers, pi, para):
         """说话人查询辅助：段落切成片段后逐片查找（与引擎相同的 key）。"""
@@ -113,6 +116,29 @@ def test_role_parser():
     c5, _s5 = analyze(p5)
     n5 = [n for n, _ in c5]
     check("「缓缓」「低头」不算人物", not n5, str(c5))
+
+    # 用户真书截图里的误报模式：动作句贪婪切分吞动词 / 连词碎片
+    p6 = [
+        "路明非抬起头，看着窗外。",
+        "路明非捏了捏眉心。",
+        "路明非低头踩过一片叶子。",
+        "路明非冲出了教室。",
+        "路明非刚说完，铃声就响了。",
+        "他已经等了很久。",
+        "即使隔着门也能听见。",
+        "接下来发生的事谁都没料到。",
+        "他随口应了一句。",
+        "路明非赞了句不错，转身走了。",
+    ]
+    c6, _s6 = analyze(p6)
+    n6 = [n for n, _ in c6]
+    check("无「路明非X」动词碎片",
+          not any(x != "路明非" and x.startswith("路明非") for x in n6),
+          str(c6))
+    check("无「他已」「即使」「接下来」「随口」碎片",
+          not {"他已", "即使", "接下来", "接下", "随口", "无声而"} & set(n6),
+          str(c6))
+    check("真名「路明非」仍被识别且次数达标", "路明非" in n6, str(c6))
 
     # 引号后置标签
     p2 = ["「站住。」路明非喊道。"]

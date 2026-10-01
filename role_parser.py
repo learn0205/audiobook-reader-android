@@ -78,10 +78,29 @@ _VERBS = ("说道", "问道", "答道", "喊道", "叫道", "笑道", "叹道", 
           "回道", "怒道", "低声道", "沉声道", "冷声道", "轻声道", "高声道",
           "大声道", "小声道", "开口道", "吩咐道", "命令道", "反驳道",
           "补充道", "嘀咕道", "嘟囔道", "呢喃道", "喃喃道", "追问道",
-          "回答道", "强调道", "继续道", "说", "问", "答", "喊", "叫",
-          "笑", "叹", "吼", "骂", "念", "喝", "道", "叮嘱", "抱怨", "催促")
+          "回答道", "强调道", "继续道", "赞叹道", "夸赞道", "称赞道",
+          "感叹道", "惊叹道", "咆哮道", "沉吟道", "解释道", "总结道",
+          "赞叹", "夸赞", "称赞", "感叹", "惊叹", "振振有词", "言简意赅",
+          # 「人名 + 动作短语 + 道」是网文最高频的标签形态，必须整体成词，
+          # 否则「路鸣泽抬起头道」会被切成「路鸣泽抬起头」这种碎片人名
+          "抬起头", "低下头", "点点头", "摇摇头", "侧过头", "回过头",
+          "偏过头", "转过头", "挠了挠", "摸了摸", "揉了揉", "眨了眨",
+          "顿了顿", "看了看", "竖起大拇指", "挑了挑眉", "皱了皱眉",
+          "叹了口气", "深吸一口气", "深吸口气", "应了一声",
+          "微笑", "冷笑", "大笑", "傻笑", "干笑", "苦笑", "怒喝",
+          "说", "问", "答", "喊", "叫", "笑", "叹", "吼", "骂", "念",
+          "喝", "道", "叮嘱", "抱怨", "催促")
 _VERB_RE = re.compile(
     "(?:" + "|".join(sorted(_VERBS, key=len, reverse=True)) + ")")
+
+# 强动词单字：标签兜底路径里，候选「人名」只要包含这些字就不算人名
+# （「起大拇指」「泽抬起头」「明非瞪眼」「女孩哽咽」这类动词碎片全靠它拦）
+_STRICT_VERB_CHARS = set("说问答喊叫骂念喝笑哭叹吼诵读讲谈议论评批夸赞"
+                         "训斥责催逼指点竖举抬压按捏握攥揪扯拽推拉拖挪"
+                         "瞪瞅盯瞧眯眨抿咬舔吐吞呼喘愣怔醒闭睁摸搓揉"
+                         "拂捂掩遮跺蹲蹦窜躬俯仰摆搁翻掀揭敲叩拍击撞砸"
+                         "摔扔掷抛投抢夺偷屏咧努撇缩蜷弓挺直绷合拢分掰"
+                         "扒撑扛扫挥揽搡晃怒冷顿住默停歇呆滞僵们眉哼轻不皱凝反惊痛心一双忽蹙先耸挠面苦沉突扶额")
 
 # 引号前的标签：动词之前的结尾 2~4 个汉字是人名（先剥掉修饰语再取尾）
 _NAME_TAIL_RE = re.compile(r"([\u4e00-\u9fa5]{2,4})$")
@@ -93,19 +112,66 @@ _PRONOUN_MALE = {"他", "他们"}
 _PRONOUN_FEMALE = {"她", "她们"}
 _PRONOUNS = _PRONOUN_MALE | _PRONOUN_FEMALE
 
-# 动词前常见的修饰成分（剥掉它们才能露出人名）
+# 动词前常见的修饰成分（剥掉它们才能露出人名）；同时也是「人名之后、
+# 动词之前」剩余文本的白名单 —— 剩余部分必须能被这些词完全覆盖，
+# 才认为开头取到的是人名（「楚子航神色平静道」✓，「路明非语重心长道」✓，
+# 而「路明非抬起被血渍…」这种余量覆盖不了的就不算标签）。
 _ADVERBS = {
     "缓缓", "淡淡", "微微", "悄悄", "默默", "静静", "慢慢", "匆匆", "轻轻",
     "深深", "紧紧", "冷冷", "笑着", "点头", "摇头", "沉声", "冷声", "低声",
     "轻声", "高声", "大声", "小声", "厉声", "柔声", "连忙", "急忙", "顿时",
     "随即", "忽然", "突然", "接着", "然后", "终于", "半天", "片刻", "良久",
     "说道", "笑道", "想了", "想了想", "叹气", "抬头", "低头", "转身", "回头",
-    "又", "再", "还", "先", "便",
+    "又", "再", "还", "先", "便", "刚", "刚刚",
+    # 神态 / 语态（网文「XX道」前的高频状语，来自真书实测）
+    "平静", "淡漠", "漠然", "认真", "严肃", "温和", "冷淡", "平淡", "木然",
+    "怔怔", "呆呆", "直直", "死死", "淡然", "黯然", "茫然", "悻悻", "讪讪",
+    "嘿嘿", "呵呵", "哈哈", "嘻嘻", "一笑", "苦笑", "莞尔", "哑然",
+    "神色", "面色", "表情", "目光", "眼神", "语气", "脸色", "嗓音", "口吻",
+    "一脸", "赶紧", "赶忙", "委婉", "老实", "无奈", "无辜", "面无表情",
+    "站了起来", "走了过来", "走了过去", "凑了过来", "回过神来", "回过神",
+    "站起身来", "抬起头来", "低下头来", "转过头来", "转过头去", "抬起头",
+    "低下头", "回过身", "侧过身", "迎了上去", "走上前去", "深吸口气",
+    "点了点头", "摇了摇头", "一本正经", "一字一顿", "语重心长", "自言自语",
+    "挤眉弄眼", "转移话题", "愤愤不平", "神色平静", "神色不变", "神色复杂",
+    "神色如常", "面色难看", "面色平静", "面色不善", "难以置信", "郑重其事",
+    "若有所思", "意味深长", "不置可否", "言简意赅", "振振有词", "目不斜视",
+    "笑眯眯", "笑呵呵", "郑重", "诚恳", "无奈", "无辜", "轻描淡写",
+    "沉默", "沉吟", "默然", "解释", "总结", "交代", "表示", "补充",
+    "强调", "咬牙", "轻笑", "幽幽", "叹息", "低语", "耸肩", "摊手",
+    "挠头", "扬眉", "挑眉", "愕然", "诧异", "震惊", "凝重", "失声",
+    "欣然", "闷声", "狐疑", "疑惑", "表情", "微微一笑", "无语", "感慨",
+    "惊讶", "讶然", "怔住", "愣住", "苦涩", "骄傲", "沙哑", "迟疑",
+    "遗憾", "试探", "随意", "前方", "低沉", "漫不经心", "小心翼翼",
+    "痛心疾首", "脱口而出", "懒洋洋", "恍惚间", "含糊不清", "不紧不慢",
+    "忍不住", "先生", "女士", "教授", "校长", "部长", "副部长", "主任",
+    "队长", "耸了耸肩", "摊了摊手", "歪头", "挑了挑眉", "扶额", "挠了挠",
+    "一怔", "一愣", "怔了怔", "愣了愣", "挠头",
 }
 _PARTICLES = set("的地了着")
 
 # 人名形状约束：2~4 个汉字（或 2~3 段以「·」相连的外国名），首字不能是虚词
 _BAD_NAME_HEAD = set("很太更最又再就都也还被把将向从在是有没不这那哪每某各另其本该第和与或但")
+_BAD_NAME_HEAD |= set("无不没非未勿而即仅只已正却倒竟皆均亦虽纵若当可对")
+
+# 动作句人名的首/尾字不能是这些字（高频单字动词/方向词/副词关联字）：
+# 「路明非抬起…」误切成「路明非抬」、「接下了…」误切成「接下」就是这么来的。
+# 只作用于动作句路径；对话标签路径证据更强，不受此限制（否则「王刚说道」
+# 里的「王刚」会被误杀）。
+_ACTION_EDGE_REJECT = set(
+    # 单字动词
+    "说看想问答喊叫骂念喝笑哭叹走跑冲站坐蹲跪躺靠倚望盯瞧扫瞄抬低转回"
+    "挥指摸捏握拿放推拉接递揉皱拍敲翻合收掏抓扶背扛拎提吃嚼咽听停等迈"
+    "跨退跟带领挡拦躲避闪伸缩颤抖垂扬举搬踩踏踢跳趴爬挑眯眨抿咬舔吐吞"
+    "呼喘愣怔醒闭睁竖弯摆晃撇咧扯拽揪捧抱搂搭揽挽梳洗刷浇洒淋赞夸训"
+    "斥责催逼讯"
+    # 方向词
+    "上下进出回来去起过到至达离"
+    # 副词 / 虚词关联字
+    "以刚而且却即便只才又再还都很太更最轻重深浅急缓慢紧松冷淡微顿从向往朝同跟透忽男女"
+    # 代词
+    "他她它你我"
+)
 _NAME_RE = re.compile(r"^[\u4e00-\u9fa5]{2,4}$|^[\u4e00-\u9fa5]{1,3}(?:·[\u4e00-\u9fa5]{1,3}){1,2}$")
 
 # 动作句：「人名 + 动作描写」文本（无引号；允许少量逗号）
@@ -151,9 +217,31 @@ _COMMON_WORDS = {
     "大人", "老板", "老师", "医生", "警察", "司机", "学生", "青年", "女子",
     "男子", "女孩", "男孩", "姑娘", "小姐", "太太", "夫人", "老爷", "大爷",
     "大妈", "大婶", "大妈", "兄弟", "大哥", "大姐", "小弟", "小子", "丫头",
+    # 连词 / 假设递进（「即使…」「无声而…」这类碎片的高发来源）
+    "即使", "既然", "虽然", "尽管", "除非", "无论", "只要", "只有", "哪怕",
+    "万一", "要是", "不但", "不仅", "而且", "并且", "况且", "何况", "那么",
+    "这样", "那样", "这般", "那般", "无声", "旋即", "继而", "转而", "却说",
+    "且说", "可见", "由此", "顷刻", "刹那", "须臾", "未几", "少顷", "俄而",
+    # 动词性习语（「随口道」「接下了」被误当人名的来源）
+    "随口", "顺口", "闭口", "住口", "接下", "接下来", "回过", "转过头",
+    # 形容词/名词性碎片（真书《龙族：重启人生》实测误报）
+    "巨大", "熟悉", "旁边", "好奇", "咆哮", "电话", "重心", "明白", "清楚",
+    "突兀", "明显", "神情", "声响", "动静", "情绪", "反应", "模样", "庞然",
+    "难怪", "犹豫", "突如其来", "曾几何时", "领队", "委托人", "扩音器",
+    "卡塞尔", "抿嘴", "挠头", "两个人", "几个人", "蓦然", "蓦地", "哽咽",
+    "抽泣", "颤声", "一行", "满脸", "满眼", "满口", "突如其", "曾几何",
+    "为什", "委托", "扩音", "卡塞", "两个", "三个", "四个", "几个",
+    "安慰", "眼巴巴", "眼睁睁", "直勾勾", "气呼呼", "芝加哥",
+    "突如", "曾几", "芝加", "所谓", "时至今日", "明明", "尤其", "同样",
+    "恍惚", "仿佛", "副校", "老男", "漆黑", "夜风", "王座", "龙类", "先前",
+    "方才", "为首",
+    "所谓", "尤其", "同样", "突然", "显然", "竟然", "居然", "固然", "诚然",
+    "快速", "尴尬", "简单", "短暂", "事实", "继续", "转头", "委屈",
+    "宽敞", "之一", "全场", "画面", "黑暗中", "屏幕", "一切", "年轻人",
+    "老男人", "中年男人", "中年男", "为一", "所谓",
 }
 
-# 性别 / 年龄归类线索（与姓名同段共现时投票）
+# 性别 / 年龄归类线索
 _FEMALE_HINTS = ("女孩", "少女", "姑娘", "小姐", "女人", "女子", "女生",
                  "阿姨", "夫人", "太太", "女士", "姐姐", "妹妹")
 _MALE_HINTS = ("男孩", "少年", "男人", "男子", "男生", "大叔", "大哥",
@@ -162,15 +250,24 @@ _OLD_FEMALE_HINTS = ("奶奶", "婆婆", "老太太", "姥姥", "外婆", "老�
                      "大妈", "大婶")
 _OLD_MALE_HINTS = ("爷爷", "老爷子", "老者", "老头", "伯父", "中年",
                    "大爷", "大叔", "叔叔", "老伯")
+# 单字亲属称谓：只在**人名本身**里查（佟姨 / 王大爷 / 张婶）；
+# 不做上下文共现投票 —— 「路明非和叔叔」这种邻句会把主角投成中年叔叔
+_KIN_FEMALE = ("姨", "婶", "嫂", "婆", "妈", "姐", "妹", "女", "姬", "衣")
+_KIN_MALE = ("叔", "伯", "爷", "爹", "哥")
+# 女性名常用字（人名内出现即强女票）；叠字名（诺诺/柳淼淼）同理
+_FEMALE_NAME_CHARS = "雯婷娜丽芳娟静蕾雪琳慧敏燕莉倩薇丹霞梅兰玉凤洁妍"                      "娴媛婧黛瑶瑾璇琪珊芙蓉蕊萍颖馨悦怡欣彤绮媚娇婉妙"
+
+# 常见姓氏（标签兜底路径的门槛：候选名必须以姓氏开头）
+_SURNAMES = set("李王张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤俞章鲁路楚慕源樱宫风酒傅凌戴盛麦唐菲洛")
 
 STACK_LIMIT = 12          # 角色栈最深保留人数
 # 成为「出场人物」的门槛：至少确认为说话人/动作句主语的次数。
 # 只出现一次的候选大多是「缓缓」「心中一凛」这类漏网误报；
 # 真正有台词的角色一本书里几乎不可能只出现一次。
-MIN_SPEAKER_MENTIONS = 2
+MIN_SPEAKER_MENTIONS = 4
 
 # 人名里不该出现的字（真实中文人名基本不含这些虚词/助词）
-_FUNCTION_CHARS = set("着了过的地得吗呢吧啊呀哦嘛么")
+_FUNCTION_CHARS = set("着了过的地得吗呢吧啊呀哦嘛么也")
 
 # 子串黑名单：候选名里包含这些词就不算人名（心中一凛 / 一片叶子…）。
 # 称谓词（太太/大爷/奶奶/大叔…）**豁免** —— 「老太太」「王大爷」这类
@@ -197,6 +294,9 @@ def _is_plausible_name(name: str) -> bool:
     if name[0] in _BAD_NAME_HEAD:
         return False
     if any(ch in _FUNCTION_CHARS for ch in name):
+        return False
+    # 名字里不该有代词字（「他已」「她俩」这类碎片）
+    if any(ch in "他她它你我" for ch in name):
         return False
     if name in _COMMON_WORDS or name in _ADVERBS:
         return False
@@ -226,16 +326,43 @@ def _strip_tail_decorations(prefix):
                 prefix = prefix[:-len(adv)]
                 stripped = True
                 break
+        if not stripped and prefix[-1] in _STRICT_VERB_CHARS:
+            # 「凯撒冷[笑]」「老人顿[住]」——动词短语前半被并进了前缀
+            prefix = prefix[:-1]
+            stripped = True
         if not stripped:
             break
     return prefix
 
 
+def _covered_by_modifiers(rest):
+    """剩余文本是否全部由已知修饰语/助词/标点构成。
+
+    「楚子航【神色平静】道」→ rest=神色平静 ✓；
+    「路明非【抬起被血渍…】」→ 覆盖不了 ✗（说明取到的不是人名边界）。
+    """
+    rest = rest.strip("，。、！？：；…—\u3000 \t")
+    while rest:
+        for w in _ADVERBS:
+            if rest.startswith(w):
+                rest = rest[len(w):]
+                break
+        else:
+            if rest[0] in _PARTICLES or rest[0] in "，。、！？：；…—\u3000 \t地得":
+                rest = rest[1:]
+                continue
+            return False
+    return True
+
+
 def _tag_before_quote(text, open_idx):
     """在引号前的窗口里找「人名/代词 + 动词」（如：楚子航沉声道：「…」）。
 
-    取引号前最多 16 字的窗口，找**第一个**说话动词（它前面通常就是
-    说话人），动词前剥掉修饰语后取结尾 2~4 个汉字当人名。
+    取引号前最多 16 字的窗口，找**第一个**说话动词。人名有两种位置：
+      ① 名字在窗口短语的**开头**，名字之后到动词之间必须全是已知修饰语
+         （楚子航【点点头，缓缓】道 / 施耐德【平静】道）；
+      ② 名字在动词短语的**结尾**（听到这话，【楚子航】缓缓道），
+         此时候选里不允许出现强动词字（防「泽抬起头」这类碎片）。
     返回人名/代词或 None。
     """
     window = text[max(0, open_idx - 16):open_idx]
@@ -250,10 +377,27 @@ def _tag_before_quote(text, open_idx):
         return prefix[-2:]
     if prefix[-1] in ("他", "她"):
         return prefix[-1]
-    nm = _NAME_TAIL_RE.search(prefix)
-    if not nm:
+    # 前缀里出现代词（他握紧小拳头…）→ 这不是人名短语
+    if any(ch in "他她它" for ch in prefix):
         return None
-    return nm.group(1)
+    # ① 名字在开头 + 剩余全是修饰语；候选本身不得含强动词字
+    for length in (2, 3, 4):
+        if len(prefix) < length:
+            break
+        cand, rest = prefix[:length], prefix[length:]
+        if _is_plausible_name(cand) and not any(
+                v in cand for v in _STRICT_VERB_CHARS):
+            if _covered_by_modifiers(rest):
+                return cand
+    # ② 名字在结尾（兜底）：候选必须以常见姓氏开头（听到这话，【楚子航】
+    # 缓缓道），否则「胸有成竹」「头也不抬」这类碎片会从这里漏进来
+    nm = _NAME_TAIL_RE.search(prefix)
+    if nm:
+        cand = nm.group(1)
+        if (cand[0] in _SURNAMES and _is_plausible_name(cand)
+                and not any(v in cand for v in _STRICT_VERB_CHARS)):
+            return cand
+    return None
 
 
 def _tag_after_quote(text, close_idx):
@@ -268,18 +412,18 @@ def _tag_after_quote(text, close_idx):
         return head[:2]
     if head[:1] in ("他", "她"):
         return head[:1]
-    nm = _NAME_HEAD_RE.match(head)
-    if not nm:
-        return None
-    # 开头 2~4 个汉字里挑人名：剩余部分必须是修饰语（夏弥笑着→夏弥）
-    cand = nm.group(1)
+    # 剥掉尾部强动词字：「路明非愣[道]」→「路明非」
+    head = _strip_tail_decorations(head)
+    # 名字在开头，剩余必须是修饰语（夏弥【笑着回答】/ 老太太【说道】）；
+    # 候选本身不得含强动词字（拦「凯撒冷[笑]」「楚子航怒[喝]」碎片）
     for length in (2, 3, 4):
-        if length > len(cand):
+        if len(head) < length:
             break
-        rest = cand[length:]
-        if rest == "" or rest in _ADVERBS or all(
-                ch in _PARTICLES for ch in rest):
-            return cand[:length]
+        cand, rest = head[:length], head[length:]
+        if _is_plausible_name(cand) and not any(
+                v in cand for v in _STRICT_VERB_CHARS):
+            if _covered_by_modifiers(rest):
+                return cand
     return None
 
 
@@ -305,11 +449,13 @@ class _Registry:
             self.speaker_count[name] += 1
 
     def vote(self, name, context_text):
-        """姓名与代词/称谓同段共现 → 给该人物投性别/年龄票。
+        """给人物投性别/年龄票。
 
-        证据强度：称谓在人名里（老太太 / 王大爷）> 称谓同段共现 >
-        人名邻近 ±12 字的代词（他/她）。代词只看邻近范围 —— 整段里
-        出现的「她」多半指的是别人，全段投票会把男生误判成女生。
+        证据只取两类（真书实测：上下文共现的称谓全是噪音 ——
+        「路明非和叔叔」会把主角投成中年叔叔）：
+          ① 称谓直接出现在人名里（老太太 / 王大爷 / 佟姨）→ 强票；
+          ② 人名邻近 ±12 字的代词「他/她」→ 弱票各记一笔，
+            男性证据必须有，否则男主角会被成段的「她」误判成女的。
         """
         votes = self.gender_votes.get(name)
         if votes is None:
@@ -322,29 +468,28 @@ class _Registry:
             if w in name:
                 self.age_votes[name]["old_m"] += 2
                 break
-        for w in _OLD_FEMALE_HINTS:
-            if w in context_text:
-                self.age_votes[name]["old_f"] += 1
+        for w in _FEMALE_HINTS + _KIN_FEMALE:
+            if w in name:
+                votes[1] += 2
                 break
-        for w in _OLD_MALE_HINTS:
-            if w in context_text:
-                self.age_votes[name]["old_m"] += 1
+        for w in _MALE_HINTS + _KIN_MALE:
+            if w in name:
+                votes[0] += 2
                 break
+        if any(ch in _FEMALE_NAME_CHARS for ch in name):
+            votes[1] += 2
+        if len(name) == 2 and name[0] == name[1]:
+            votes[1] += 2          # 叠字名（诺诺）多为女性
+        if (len(name) == 3 and name[1] == name[2]
+                and name[0] in _SURNAMES):
+            votes[1] += 2          # 三字叠音名（柳淼淼）多为女性
         idx = context_text.find(name)
         if idx >= 0:
-            # 只统计邻近的「她」：男是默认值，「他」的邻近共现大多是
-            # 指别人的宾语（「夏弥看了他一眼」），投男票只会帮倒忙
             window = context_text[max(0, idx - 12): idx + len(name) + 12]
             if "她" in window:
                 votes[1] += 1
-        for w in _FEMALE_HINTS:
-            if w in context_text:
-                votes[1] += 2
-                break
-        for w in _MALE_HINTS:
-            if w in context_text:
-                votes[0] += 2
-                break
+            if "他" in window:
+                votes[0] += 1
 
     def vote_pronoun(self, name, gender):
         """代词标签（他说道/她说道）解析出的说话人 → 强性别票。"""
@@ -370,9 +515,44 @@ class _Registry:
         return "female" if v[1] > v[0] else "male"
 
     def result(self):
-        """出场人物清单：按首次出场排序，只保留达到频率门槛的人名。"""
-        return [(name, self.category(name)) for name in self.order
+        """出场人物清单：按首次出场排序，只保留达到频率门槛的人名。
+
+        包含关系合并：「昂热一」「恺撒挠」「曼施坦」这类碎片必然是
+        真名（昂热/恺撒/曼施坦因）的超集 —— 互为子串的两个候选只保留
+        确认次数高的那个。
+        """
+        kept = [(name, self.speaker_count.get(name, 0))
+                for name in self.order
                 if self.speaker_count.get(name, 0) >= MIN_SPEAKER_MENTIONS]
+        kept.sort(key=lambda x: -x[1])
+        dropped = set()
+        for i, (a, ca) in enumerate(kept):
+            if a in dropped:
+                continue
+            for j, (b, cb) in enumerate(kept[i + 1:], i + 1):
+                if b in dropped or b == a:
+                    continue
+                winner = None
+                if b.startswith(a):
+                    # b = a + 附加字：附加字全是动词残片（恺撒+挠）→ 留短名；
+                    # 是名字的一部分（曼施坦+因）→ 留长名
+                    extra = b[len(a):]
+                    winner = (a if all(ch in _STRICT_VERB_CHARS
+                                       for ch in extra) else b)
+                elif a.startswith(b):
+                    extra = a[len(b):]
+                    winner = (b if all(ch in _STRICT_VERB_CHARS
+                                       for ch in extra) else a)
+                elif a in b:
+                    winner = a if ca >= cb else b
+                elif b in a:
+                    winner = a if ca >= cb else b
+                if winner is not None:
+                    dropped.add(b if winner is a else a)
+                    if winner is b:      # 当前 a 被合并 → 换下一个 a
+                        break
+        return [(name, self.category(name)) for name in self.order
+                if name in set(n for n, _ in kept) - dropped]
 
 
 class _Stack:
@@ -430,8 +610,8 @@ _ACTION_NAME_BLACKLIST = set("说道问答题想看走来的了吗呢吧嘛啊�
 def _maybe_action_name(segment, registry, stack):
     """旁白片段若匹配「人名 + 动作描写」→ 登记人名并入栈。返回人名或 None。
 
-    名字取 2~4 字，从长到短拆分，取「余下部分含动作动词」的最长拆法：
-    「楚子航推开…」→楚子航（3字），「夏弥低头踩过…」→夏弥（2字）。
+    名字只取 2~3 字（4 字档在真书里几乎全是「路明非抬」「神色平静」
+    这类贪婪碎片；真复姓名会由对话标签路径兜住）。
     """
     seg = segment.strip()
     if not seg or len(seg) > 40:
@@ -440,13 +620,17 @@ def _maybe_action_name(segment, registry, stack):
     if not m or "：" in segment or ":" in segment:
         return None
     head, tail = m.group(1), m.group(2)
-    for length in (4, 3, 2):
+    for length in (3, 2):
         if length > len(head):
             continue
         name, rest = head[:length], head[length:] + tail
         if not _is_plausible_name(name):
             continue
         if any(ch in _ACTION_NAME_BLACKLIST for ch in name):
+            continue
+        # 首尾字是动词/方向词/虚词 → 不是人名（「路明非抬」「接下」这类
+        # 贪婪切分碎片全靠这条拦截）；真名留给出更长/更短档
+        if name[0] in _ACTION_EDGE_REJECT or name[-1] in _ACTION_EDGE_REJECT:
             continue
         if not _ACTION_VERB_RE.search(rest):
             continue
