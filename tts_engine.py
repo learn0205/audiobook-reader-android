@@ -185,6 +185,23 @@ class EdgeTTS:
         self._prefetch_inflight = set()   # 预取中的缓存键（去重，防止同句并发合成）
         self._ready = True           # Edge 不需要离线初始化，构造即可用
         self._init_error = ""
+        self._user_data_dir = ""     # 由 _set_cache_dir 传入（sherpa 用）
+
+    def _kokoro_synth(self, sentence, voice, path, rate):
+        """离线合成：kokoro:<sid> → sherpa-onnx Kokoro，失败抛异常由上层降级。"""
+        import sherpa_tts
+        try:
+            sid = int(voice.split(":", 1)[1])
+        except (TypeError, ValueError):
+            sid = 0
+        # rate "+15%" / "-20%" → 倍速 1.15 / 0.8
+        try:
+            speed = max(0.5, min(2.0, 1.0 + float(rate.strip("%").replace("+", "")) / 100.0))
+        except (TypeError, ValueError):
+            speed = 1.0
+        data_dir = getattr(self, "_user_data_dir", "") or ""
+        sherpa_tts.get_instance(data_dir).synth_to_file(
+            sentence, sid, path, speed=speed)
 
     # ==================== 生命周期 ====================
     def start(self):
@@ -309,11 +326,17 @@ class EdgeTTS:
 
     def _set_cache_dir(self, base):
         if base:
+            self._user_data_dir = base
             self._cache_dir = os.path.join(base, "edge_cache")
             try:
                 os.makedirs(self._cache_dir, exist_ok=True)
             except Exception:
                 pass
+
+    @staticmethod
+    def _is_kokoro(voice):
+        """离线音色名以 kokoro:<说话人编号> 标识。"""
+        return isinstance(voice, str) and voice.startswith("kokoro:")
 
     # ==================== 书籍数据 ====================
     def load(self, paragraphs):
@@ -390,6 +413,8 @@ class EdgeTTS:
                     v, mult, phz = r
                     if v:
                         voice = str(v)
+                        if self._is_kokoro(voice):
+                            phz = 0        # 离线引擎不支持音调，归零避免重复缓存
                     mult = max(0.5, min(2.0, float(mult)))
                     phz = max(-50, min(50, int(phz)))
                     rate = "%+d%%" % round((mult - 1.0) * 100)
@@ -609,8 +634,12 @@ class EdgeTTS:
             path = self._cache_path(sentence, params=params)
             # 命中缓存则跳过网络合成
             if not (self._cache_dir and os.path.exists(path)):
-                edge_tts_client.synthesize_to_file(
-                    sentence, voice, path, rate=rate, pitch=pitch, volume=volume)
+                if self._is_kokoro(voice):
+                    self._kokoro_synth(sentence, voice, path, rate)
+                else:
+                    edge_tts_client.synthesize_to_file(
+                        sentence, voice, path, rate=rate, pitch=pitch,
+                        volume=volume)
                 self._prune_cache(keep_path=path)
             if generation != self._generation:
                 return
@@ -782,8 +811,12 @@ class EdgeTTS:
                     return
                 params = self._voice_params_for(idx)
                 voice, rate, pitch, volume = params
-                edge_tts_client.synthesize_to_file(
-                    sentence, voice, path, rate=rate, pitch=pitch, volume=volume)
+                if self._is_kokoro(voice):
+                    self._kokoro_synth(sentence, voice, path, rate)
+                else:
+                    edge_tts_client.synthesize_to_file(
+                        sentence, voice, path, rate=rate, pitch=pitch,
+                        volume=volume)
                 self._prune_cache(keep_path=path)
             except Exception:
                 pass
@@ -928,8 +961,38 @@ class ReaderTTS:
         tagged = [dict(v, source="android") if "source" not in v else v
                   for v in sys_voices]
         edge_voices = self._edge_voices
-        # 系统音色在前、Edge 在线音色在后；各自内部已按中文优先排序
-        merged = tagged + edge_voices
+        # 离线音色（Kokoro）已就绪则并入；source=edge 让路由走 EdgeTTS
+        # 后端 —— 它内部会按 kokoro: 前缀把合成转给 sherpa_tts
+        kokoro = self._kokoro_voices()
+        # 系统音色在前、Edge 在线音色居中、离线音色在后
+        merged = tagged + edge_voices + kokoro
+        self._merged_voices = merged
+        self.on_voices(merged)
+
+    def _kokoro_voices(self):
+        """模型就绪时返回离线音色列表（kokoro:<sid>），否则空。"""
+        try:
+            import sherpa_tts
+            inst = sherpa_tts.get_instance(self._user_data_dir)
+            if not inst.model_ready():
+                return []
+            return [{"name": name, "label": "%s（Kokoro·离线·中英）" % label,
+                     "locale": "zh-CN", "source": "edge", "gender": "离线"}
+                    for name, label in inst.list_speakers()]
+        except Exception:
+            return []
+
+    def refresh_kokoro_voices(self):
+        """离线语音包下载完成后调用：重算音色列表并通知 UI。"""
+        try:
+            self._kokoro = self._kokoro_voices()
+        except Exception:
+            self._kokoro = []
+        merged = [dict(v) for v in self._merged_voices]
+        names = {v.get("name") for v in merged}
+        for v in self._kokoro_voices():
+            if v["name"] not in names:
+                merged.append(v)
         self._merged_voices = merged
         self.on_voices(merged)
 
@@ -946,8 +1009,10 @@ class ReaderTTS:
             edge = []
             for v in raw:
                 locale = v.get("Locale", "")
-                # 主推中文（zh-*）音色，其余也保留但排后面
-                if not locale.startswith("zh"):
+                # 只保留 普通话中文（zh-CN*）与英文（en-*）音源，
+                # 粤语(zh-HK)/台湾(zh-TW)/其他语言一律不进列表
+                if not (locale.startswith("zh-CN")
+                        or locale.startswith("en")):
                     continue
                 short = v.get("ShortName", "")
                 # 从 ShortName 末段取好读的中文音色调名，例如

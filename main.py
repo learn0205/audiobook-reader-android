@@ -602,6 +602,11 @@ class AudioBookApp(App, WakelockFgMixin):
             user_data_dir=self.user_data_dir,
         )
         self._engine.start()
+        # 离线语音包（Kokoro）已下载过 → 音色列表追加离线音色
+        try:
+            self._engine.refresh_kokoro_voices()
+        except Exception:
+            pass
         self._engine.set_speed(float(self._config.get("speed", 1.0)))
         self._engine.set_pitch(int(self._config.get("pitch", 0)))
         self._engine.set_intonation(bool(self._config.get("intonation", True)))
@@ -3151,6 +3156,49 @@ class AudioBookApp(App, WakelockFgMixin):
                            size_hint_y=None, height=dp(44))
         btn_tpl.bind(on_release=lambda *_: self._show_template_panel(popup))
         box.add_widget(self._safe_text(btn_tpl, min_height=dp(44)))
+
+        # ---- 离线语音包（Kokoro·开源·中英双语·约348MB）----
+        try:
+            import sherpa_tts as _sherpa
+            _st = _sherpa.get_state()
+            _inst = _sherpa.get_instance(self.user_data_dir)
+            if _inst.model_ready():
+                _line = "离线语音包：已就绪（Kokoro·103音色·完全离线）"
+            elif _st["status"] == "downloading":
+                _line = "离线语音包：下载中… %s" % (_st["message"] or "")
+            elif _st["status"] == "error":
+                _line = "离线语音包：上次失败（%s）" % (_st["message"][:36] or "未知")
+            else:
+                _line = "离线语音包：未下载（Kokoro·103音色·中英·约348MB）"
+            box.add_widget(self._auto_label("离线语音包（Kokoro）", font_size="13sp",
+                                            min_height=dp(24)))
+            box.add_widget(self._auto_label(_line, font_size="12sp",
+                                            min_height=dp(22)))
+            if not _inst.model_ready() and _st["status"] != "downloading":
+                btn_dl = ABButton(text="下载离线语音包（下载后完全离线可用）",
+                                  size_hint_y=None, height=dp(44))
+
+                def _start_dl(*_):
+                    popup.dismiss()
+                    self._toast("开始下载离线语音包…完成后自动加入音色列表")
+
+                    def _done(ok, msg):
+                        def _apply():
+                            try:
+                                self._engine.refresh_kokoro_voices()
+                            except Exception:
+                                pass
+                            self._toast("离线语音包就绪，音色列表已新增 Kokoro 离线音色"
+                                        if ok else "离线语音包下载失败：" + msg)
+                        self._post_to_main(_apply)
+
+                    import sherpa_tts as _sh2
+                    _sh2.download_async(self.user_data_dir, done_cb=_done)
+
+                btn_dl.bind(on_release=_start_dl)
+                box.add_widget(self._safe_text(btn_dl, min_height=dp(44)))
+        except Exception:
+            pass
 
         # ---- 主题（深色 / 浅色，点击即时切换并记忆）----
         btn_theme = ABButton(

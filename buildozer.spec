@@ -49,6 +49,10 @@ icon.filename = %(source.dir)s/icon.png
 # ---------------------------------------------------------------------------
 android.archs = arm64-v8a
 
+# 离线 TTS（sherpa-onnx v1.11.3 的 C API .so，CI 从 GitHub Releases 下载到 libs/）；
+# 运行时用 ctypes 调 C API 合成，模型文件由应用内「下载离线语音包」获取
+android.add_libs_arm64_v8a = libs/arm64-v8a/*.so
+
 # Android 版本：minapi 24 = Android 7.0，target/compile api 34 = Android 14
 # （Google Play 2024 起要求 targetSdk 34+；p4a develop 已兼容）
 android.api = 34

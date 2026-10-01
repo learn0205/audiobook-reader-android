@@ -8,3 +8,4 @@ __pycache__/
 # 本地配置与书籍缓存
 books/
 config.json
+_kokoro_test/

@@ -65,21 +65,19 @@ DEFAULT_SLOTS = {
     "少女2":     {"voice": "zh-CN-XiaomengNeural", "pitch": 10, "rate": 1.0},
     "少女3":     {"voice": "zh-CN-XiaoyanNeural",  "pitch": 8,  "rate": 1.08},
     "少女4":     {"voice": "zh-CN-XiaoyuNeural",   "pitch": 12, "rate": 0.95},
-    # ---- 港台腔 ----
-    "港台1":     {"voice": "zh-HK-HiuMaanNeural",  "pitch": 0,  "rate": 1.0},
-    "港台2":     {"voice": "zh-HK-HiuGaaiNeural",  "pitch": 0,  "rate": 1.0},
-    "港台3":     {"voice": "zh-HK-WanLungNeural",  "pitch": 0,  "rate": 1.0},
-    "港台4":     {"voice": "zh-TW-HsiaoChenNeural","pitch": 0,  "rate": 1.0},
-    "港台5":     {"voice": "zh-TW-YunJheNeural",   "pitch": 0,  "rate": 1.0},
-    "港台6":     {"voice": "zh-TW-HsiaoYuNeural",  "pitch": 5,  "rate": 1.0},
-    # ---- 方言 ----
-    "方言1":     {"voice": "zh-CN-liaoning-XiaobeiNeural", "pitch": 0, "rate": 1.0},
-    "方言2":     {"voice": "zh-CN-shaanxi-XiaoniNeural",   "pitch": 0, "rate": 1.0},
+    # ---- 离线（sherpa-onnx + Kokoro-82M，中英双语；下载语音包后可用） ----
+    "离线1":     {"voice": "kokoro:0",  "pitch": 0,  "rate": 1.0},
+    "离线2":     {"voice": "kokoro:1",  "pitch": 0,  "rate": 1.0},
+    "离线3":     {"voice": "kokoro:2",  "pitch": 0,  "rate": 1.0},
+    "离线4":     {"voice": "kokoro:3",  "pitch": 0,  "rate": 1.0},
+    "离线5":     {"voice": "kokoro:4",  "pitch": 0,  "rate": 1.0},
+    "离线6":     {"voice": "kokoro:5",  "pitch": 0,  "rate": 1.0},
+    "离线7":     {"voice": "kokoro:6",  "pitch": 0,  "rate": 1.0},
+    "离线8":     {"voice": "kokoro:7",  "pitch": 0,  "rate": 1.0},
 }
 
 # 类别名 → 该类的编号清单（保持声明顺序，自动映射时按序取用）
-CATEGORY_ORDER = ("男角色", "中年叔叔", "女角色", "奶奶",
-                  "童声", "少女", "港台", "方言")
+CATEGORY_ORDER = ("男角色", "中年叔叔", "女角色", "奶奶", "童声", "少女")
 
 # 常见 Edge 中文音色的短名（FriendlyName 太长，界面上显示短名更好认）
 VOICE_FRIENDLY = {
@@ -118,6 +116,21 @@ VOICE_FRIENDLY = {
     "zh-HK-HiuGaaiNeural": "曉佳(粤)",
     "zh-CN-liaoning-XiaobeiNeural": "晓北(东北)",
     "zh-CN-shaanxi-XiaoniNeural": "晓妮(陕西)",
+    "en-US-JennyNeural": "Jenny(英)",
+    "en-US-AriaNeural": "Aria(英)",
+    "en-US-AnaNeural": "Ana(英)",
+    "en-US-AvaNeural": "Ava(英)",
+    "en-US-EmmaNeural": "Emma(英)",
+    "en-US-MichelleNeural": "Michelle(英)",
+    "en-US-GuyNeural": "Guy(英)",
+    "en-US-DavisNeural": "Davis(英)",
+    "en-US-AndrewNeural": "Andrew(英)",
+    "en-US-BrianNeural": "Brian(英)",
+    "en-US-EricNeural": "Eric(英)",
+    "en-US-RogerNeural": "Roger(英)",
+    "en-GB-SoniaNeural": "Sonia(英)",
+    "en-GB-LibbyNeural": "Libby(英)",
+    "en-GB-RyanNeural": "Ryan(英)",
 }
 
 

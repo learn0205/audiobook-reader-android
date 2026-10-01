@@ -318,6 +318,51 @@ def test_engine_resolver():
     check("状态机不受影响", e.get_state() == STATE_STOPPED)
 
 
+def test_kokoro_engine_routing():
+    """Kokoro 离线路由：kokoro: 音色 → sherpa 合成；音调归零。
+
+    需要 sherpa-onnx（pip）与本地模型（_kokoro_test/models），
+    二者缺一自动跳过 —— CI 上无模型时不会失败。
+    """
+    section("Kokoro 离线路由（sherpa_tts + EdgeTTS）")
+    try:
+        import sherpa_onnx  # noqa: F401
+    except ImportError:
+        print("  (sherpa-onnx 未安装，跳过)")
+        return
+    import os
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(here, "_kokoro_test", "models")
+    if not os.path.isfile(os.path.join(
+            model_dir, "sherpa", "kokoro", "model.onnx")):
+        print("  (本地无 Kokoro 模型，跳过)")
+        return
+    import sherpa_tts
+    from tts_engine import EdgeTTS
+
+    tmp = tempfile.mkdtemp(prefix="kokoro_route_")
+    e = EdgeTTS()
+    e._set_cache_dir(tmp)
+    e._user_data_dir = model_dir
+    e.set_voice("kokoro:0")
+
+    # 合成路由：kokoro: 音色 → sherpa 合成 wav
+    path = os.path.join(tmp, "kokoro0.wav")
+    e._kokoro_synth("第一章，路明非睁开眼睛。", "kokoro:0", path, "+0%")
+    check("kokoro: 音色离线合成 wav", os.path.isfile(path)
+          and os.path.getsize(path) > 20000)
+
+    # 音调归零（Kokoro 不支持音调，避免同音色重复缓存）
+    e.load(["测试一句话。"])
+    v = e._voice_params_for(0)
+    check("kokoro 音调归零", v[0] == "kokoro:0" and v[2] == "+0Hz", str(v))
+
+    # 音色列表合并
+    voices = e.__class__ and sherpa_tts.get_instance(model_dir).list_speakers()
+    check("离线音色列表非空", len(voices) >= 100, str(len(voices)))
+
+
 def test_compile_all():
     section("全部源码可编译")
     import py_compile
@@ -337,6 +382,7 @@ if __name__ == "__main__":
         test_voice_template()
         test_role_config()
         test_engine_resolver()
+        test_kokoro_engine_routing()
         test_compile_all()
     except Exception:
         traceback.print_exc()
