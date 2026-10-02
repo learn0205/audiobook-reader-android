@@ -64,9 +64,12 @@ jobs:
           mkdir -p libs/arm64-v8a
           curl -fL --retry 5 -o /tmp/sherpa-android.tar.bz2             "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.11.3/sherpa-onnx-v1.11.3-android.tar.bz2"
           rm -rf /tmp/sherpa-extract && mkdir -p /tmp/sherpa-extract
-          # 压缩包内直接是 jniLibs/<abi>/（无外层版本目录），用 find 兼容
+          # 压缩包内直接是 jniLibs/<abi>/（无外层版本目录），用 find 定位目录，
+          # 再用 shell 展开通配符复制（find -exec 不做 glob 展开）
           tar -xjf /tmp/sherpa-android.tar.bz2 -C /tmp/sherpa-extract
-          find /tmp/sherpa-extract -type d -name arm64-v8a             -exec cp {}/*.so libs/arm64-v8a/ \;
+          SRC_DIR=$(find /tmp/sherpa-extract -type d -name arm64-v8a | head -1)
+          echo "so dir: $SRC_DIR"
+          cp "$SRC_DIR"/*.so libs/arm64-v8a/
           ls -la libs/arm64-v8a
           test -f libs/arm64-v8a/libsherpa-onnx-c-api.so
 
