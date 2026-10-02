@@ -63,9 +63,12 @@ jobs:
         run: |
           mkdir -p libs/arm64-v8a
           curl -fL --retry 5 -o /tmp/sherpa-android.tar.bz2             "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.11.3/sherpa-onnx-v1.11.3-android.tar.bz2"
-          tar -xjf /tmp/sherpa-android.tar.bz2 -C /tmp
-          cp /tmp/sherpa-onnx-v1.11.3-android/jniLibs/arm64-v8a/*.so libs/arm64-v8a/
+          rm -rf /tmp/sherpa-extract && mkdir -p /tmp/sherpa-extract
+          # 压缩包内直接是 jniLibs/<abi>/（无外层版本目录），用 find 兼容
+          tar -xjf /tmp/sherpa-android.tar.bz2 -C /tmp/sherpa-extract
+          find /tmp/sherpa-extract -type d -name arm64-v8a             -exec cp {}/*.so libs/arm64-v8a/ \;
           ls -la libs/arm64-v8a
+          test -f libs/arm64-v8a/libsherpa-onnx-c-api.so
 
       # 把本次构建的 commit 短哈希写进 build_info.py，随 APK 一起打包。
       # 这样 App 里能直接看到「装的是哪一版」，不用靠猜。
