@@ -46,8 +46,8 @@ class SherpaOnnxGeneratedAudio(ctypes.Structure):
                 ("sample_rate", ctypes.c_int32)]
 
 # 模型下载源（按顺序尝试；国内网络 GitHub 时好时坏，HF 镜像兜底）
-GITHUB_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-              "tts-models/kokoro-multi-lang-v1_1.tar.bz2")
+GITHUB_URL = ("https://github.com/learn0205/audiobook-reader-android/"
+              "releases/download/voicepack-v1/kokoro-multi-lang-v1_1.zip")
 HF_MIRROR_URL = ("https://hf-mirror.com/csukuangfj/kokoro-multi-lang-v1_1/"
                  "resolve/main/")
 HF_FILE_LIST = ("https://hf-mirror.com/api/models/"
@@ -136,6 +136,7 @@ class SherpaTTS:
                                           progress_cb)
                 if os.path.isfile(tar_path) and \
                         os.path.getsize(tar_path) > 100 * 1024 * 1024:
+                    return True      # zip 完整性由 _extract_zip 校验
                     return True
             except Exception:
                 time.sleep(3)
@@ -210,7 +211,8 @@ class SherpaTTS:
             return False
         set_state("downloading", "复制语音包…", 0.0)
         os.makedirs(self.model_dir, exist_ok=True)
-        tar_path = self.model_dir + ".tar.bz2"
+        ext = ".zip" if src_path.lower().endswith(".zip") else ".tar.bz2"
+        tar_path = self.model_dir + ext
         try:
             total = os.path.getsize(src_path)
             copied = 0
@@ -238,6 +240,8 @@ class SherpaTTS:
         dict/ 等**多级子目录必须原样保留**（早期实现用 basename 平铺，
         把 phontab/词典文件全写丢在根目录，导致合成报错）。
         """
+        if tar_path.lower().endswith(".zip"):
+            return self._extract_zip(tar_path, progress_cb)
         try:
             import tarfile
             set_state("downloading", "解压语音包…", None)
@@ -267,6 +271,49 @@ class SherpaTTS:
                         progress_cb(0.5 + 0.5 * done / len(members))
             try:
                 os.remove(tar_path)
+            except OSError:
+                pass
+            ready = self.model_ready()
+            if ready:
+                set_state("ready", "离线语音包就绪")
+            else:
+                set_state("error", "解压后缺少模型文件")
+            return ready
+        except Exception as err:
+            set_state("error", "解压失败：%s" % err)
+            return False
+
+    def _extract_zip(self, zip_path, progress_cb=None):
+        """解压 zip 到模型目录（安卓没有 bz2 模块，zip 格式是唯一选择）。"""
+        try:
+            import zipfile
+            set_state("downloading", "解压语音包…", None)
+            tops = ("kokoro-multi-lang-v1_1/", "./")
+            with zipfile.ZipFile(zip_path) as z:
+                infos = z.infolist()
+                done = 0
+                for zi in infos:
+                    rel = zi.filename.replace("\\", "/")
+                    for top in tops:
+                        if rel.startswith(top):
+                            rel = rel[len(top):]
+                            break
+                    rel = rel.lstrip("./")
+                    if not rel:
+                        continue
+                    dest = os.path.join(self.model_dir, *rel.split("/"))
+                    if zi.is_dir():
+                        os.makedirs(dest, exist_ok=True)
+                    else:
+                        os.makedirs(os.path.dirname(dest) or self.model_dir,
+                                    exist_ok=True)
+                        with z.open(zi) as src, open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                    done += 1
+                    if progress_cb and done % 60 == 0:
+                        progress_cb(0.5 + 0.5 * done / len(infos))
+            try:
+                os.remove(zip_path)
             except OSError:
                 pass
             ready = self.model_ready()
