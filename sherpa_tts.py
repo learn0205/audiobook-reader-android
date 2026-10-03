@@ -202,23 +202,69 @@ class SherpaTTS:
                 progress_cb((i + 1) / total)
         return self.model_ready()
 
-    def _extract(self, tar_path):
+    # ---------------- 本地导入（推荐：QQ/网盘传到手机后从本地导入） ----------------
+    def import_from_file(self, src_path, progress_cb=None):
+        """从本地 .tar.bz2 导入语音包（手机上从 QQ 接收/下载目录选）。"""
+        if not os.path.isfile(src_path):
+            set_state("error", "文件不存在")
+            return False
+        set_state("downloading", "复制语音包…", 0.0)
+        os.makedirs(self.model_dir, exist_ok=True)
+        tar_path = self.model_dir + ".tar.bz2"
+        try:
+            total = os.path.getsize(src_path)
+            copied = 0
+            with open(src_path, "rb") as src, open(tar_path, "wb") as dst:
+                while True:
+                    chunk = src.read(1024 * 512)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    copied += len(chunk)
+                    if progress_cb and total:
+                        progress_cb(min(1.0, copied / total) * 0.5)
+            ok = self._extract(tar_path, progress_cb)
+            if ok and progress_cb:
+                progress_cb(1.0)
+            return ok
+        except Exception as err:
+            set_state("error", "导入失败：%s" % err)
+            return False
+
+    def _extract(self, tar_path, progress_cb=None):
+        """解压 tar.bz2 到模型目录，保留相对子目录结构。
+
+        压缩包内顶层是 kokoro-multi-lang-v1_1/，其下的 espeak-ng-data/、
+        dict/ 等**多级子目录必须原样保留**（早期实现用 basename 平铺，
+        把 phontab/词典文件全写丢在根目录，导致合成报错）。
+        """
         try:
             import tarfile
             set_state("downloading", "解压语音包…", None)
+            tops = ("kokoro-multi-lang-v1_1/", "./")
             with tarfile.open(tar_path, "r:bz2") as tar:
-                # 压缩包内有一层目录 kokoro-multi-lang-v1_1/
-                for member in tar.getmembers():
-                    if member.isfile():
-                        name = os.path.basename(member.name)
-                        dest = os.path.join(self.model_dir, name)
-                        with tar.extractfile(member) as src, \
-                                open(dest, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                    elif member.isdir():
-                        name = os.path.basename(member.name.rstrip("/"))
-                        os.makedirs(os.path.join(self.model_dir, name),
+                members = tar.getmembers()
+                done = 0
+                for member in members:
+                    rel = member.name.replace("\\", "/")
+                    for top in tops:
+                        if rel.startswith(top):
+                            rel = rel[len(top):]
+                            break
+                    rel = rel.lstrip("./")
+                    if not rel:
+                        continue
+                    dest = os.path.join(self.model_dir, *rel.split("/"))
+                    if member.isdir() or rel.endswith("/"):
+                        os.makedirs(dest, exist_ok=True)
+                    elif member.isfile():
+                        os.makedirs(os.path.dirname(dest) or self.model_dir,
                                     exist_ok=True)
+                        with tar.extractfile(member) as src,                                 open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                    done += 1
+                    if progress_cb and done % 60 == 0:
+                        progress_cb(0.5 + 0.5 * done / len(members))
             try:
                 os.remove(tar_path)
             except OSError:
@@ -233,7 +279,6 @@ class SherpaTTS:
             set_state("error", "解压失败：%s" % err)
             return False
 
-    # ---------------- 引擎加载 ----------------
     def _ensure_loaded(self):
         """懒加载模型（失败置 _failed，之后直接走降级）。"""
         with self._load_lock:

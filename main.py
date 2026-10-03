@@ -129,6 +129,7 @@ else:                                        # 字体缺失时给个明确提示
 REQUEST_PICK_BOOK = 1001
 REQUEST_EXPORT_CFG = 1002   # 导出书签/进度备份（ACTION_CREATE_DOCUMENT）
 REQUEST_EXPORT_LOG = 1003   # 导出诊断日志（ACTION_CREATE_DOCUMENT）
+REQUEST_PICK_MODEL = 1004   # 选择离线语音包（.tar.bz2）导入
 
 KV = """
 # ============================================================
@@ -878,7 +879,7 @@ class AudioBookApp(App, WakelockFgMixin):
     def _on_activity_result(self, request_code, result_code, intent):
         """SAF 选择器返回：书本 → 复制后打开；.json → 备份导入；导出码 → 落盘。"""
         if request_code not in (REQUEST_PICK_BOOK, REQUEST_EXPORT_CFG,
-                                REQUEST_EXPORT_LOG):
+                                REQUEST_EXPORT_LOG, REQUEST_PICK_MODEL):
             return
         try:
             from android import activity
@@ -909,6 +910,35 @@ class AudioBookApp(App, WakelockFgMixin):
             except Exception:
                 pass
             name = (self._query_display_name(resolver, uri) if resolver else "") or ""
+            if request_code == REQUEST_PICK_MODEL:
+                # 离线语音包本地导入：复制到私有目录后后台解压（数百MB，放线程）
+                def _import_model():
+                    try:
+                        import sherpa_tts as _sh
+                        part = os.path.join(self.user_data_dir,
+                                            "import_model.tar.bz2")
+                        self._copy_uri_to_file(uri, part)
+                        inst = _sh.get_instance(self.user_data_dir)
+                        ok = inst.import_from_file(part)
+                        try:
+                            os.remove(part)
+                        except OSError:
+                            pass
+
+                        def _apply():
+                            try:
+                                self._engine.refresh_kokoro_voices()
+                            except Exception:
+                                pass
+                            self._toast("离线语音包导入成功，音色列表已新增 Kokoro 离线音色"
+                                        if ok else
+                                        "语音包导入失败：" + _sh.get_state()["message"])
+                        self._post_to_main(_apply)
+                    except Exception as err:
+                        self._post_to_main(lambda: self._toast(
+                            "语音包导入失败：%s" % err))
+                threading.Thread(target=_import_model, daemon=True).start()
+                return
             if name.lower().endswith(".json"):
                 data = self._read_uri_text(uri)
                 self._post_to_main(lambda: self._import_backup(data))
@@ -923,6 +953,24 @@ class AudioBookApp(App, WakelockFgMixin):
         except Exception as err:
             # 走 _on_error：既弹 toast，也记进「自检信息 → 最近错误」（便于截图定位）
             self._on_error(f"读取所选文件失败：{err}")
+
+    def _pick_model_file(self):
+        """系统文件选择器：挑离线语音包 .tar.bz2（QQ 接收后移到下载目录）。"""
+        if not self._android():
+            self._toast("桌面环境请把 tar.bz2 放到应用数据目录后重启")
+            return
+        try:
+            from android import activity
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("*/*")
+            activity.bind(on_activity_result=self._on_activity_result)
+            PythonActivity.mActivity.startActivityForResult(intent, REQUEST_PICK_MODEL)
+        except Exception as err:
+            self._toast(f"打开文件选择器失败：{err}")
 
     def _import_backup(self, data):
         """恢复书签/进度备份（必须在 Kivy 主线程：会刷新界面）。"""
@@ -941,6 +989,25 @@ class AudioBookApp(App, WakelockFgMixin):
         try:
             with os.fdopen(os.dup(pfd.getFd()), encoding="utf-8") as f:
                 return f.read()
+        finally:
+            try:
+                pfd.close()
+            except Exception:
+                pass
+
+    def _copy_uri_to_file(self, uri, dest):
+        """把 SAF content:// 流式复制到本地文件（语音包数百MB，防 OOM）。"""
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        resolver = PythonActivity.mActivity.getContentResolver()
+        pfd = resolver.openFileDescriptor(uri, "r")
+        try:
+            with os.fdopen(os.dup(pfd.getFd()), "rb") as src,                     open(dest, "wb") as dst:
+                while True:
+                    chunk = src.read(1024 * 512)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
         finally:
             try:
                 pfd.close()
@@ -3197,6 +3264,15 @@ class AudioBookApp(App, WakelockFgMixin):
 
                 btn_dl.bind(on_release=_start_dl)
                 box.add_widget(self._safe_text(btn_dl, min_height=dp(44)))
+                btn_import = ABButton(text="从本地导入语音包（电脑用QQ传 .tar.bz2 到手机后选它）",
+                                      size_hint_y=None, height=dp(44))
+
+                def _pick_model(*_):
+                    popup.dismiss()
+                    self._pick_model_file()
+
+                btn_import.bind(on_release=_pick_model)
+                box.add_widget(self._safe_text(btn_import, min_height=dp(44)))
         except Exception:
             pass
 
