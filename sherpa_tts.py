@@ -505,9 +505,17 @@ class SherpaTTS:
               % self._num_speakers)
 
     # ---------------- 合成 ----------------
+    # kokoro-multi-lang-v1_1 文档值：103 个说话人。
+    # 音色列表只用这个常量，**绝不**为它触发模型加载 ——
+    # 此前 list_speakers() → _ensure_loaded() 会在主线程同步初始化
+    # onnxruntime（几十秒 ANR + 数百MB 内存），导致导入后/启动时
+    # App 必卡死闪退。模型只在合成线程里真正懒加载。
+    EXPECTED_SPEAKERS = 103
+
     def num_speakers(self):
-        self._ensure_loaded()
-        return self._num_speakers
+        if self.is_loaded():
+            return self._num_speakers
+        return self.EXPECTED_SPEAKERS
 
     def synth_to_file(self, text, sid, path, speed=1.0):
         """合成一句话并写成 wav（MediaPlayer 可直接播放）。
