@@ -233,6 +233,20 @@ class SherpaTTS:
             set_state("error", "导入失败：%s" % err)
             return False
 
+    def _detect_archive_format(self, path):
+        """按文件头嗅探压缩格式（扩展名不可信——导入/下载的临时文件名
+        可能与真实格式不符，这正是手机上 bz2 报错的根源）。"""
+        try:
+            with open(path, "rb") as f:
+                head = f.read(4)
+        except OSError:
+            head = b""
+        if head[:2] == b"PK":
+            return "zip"
+        if head[:3] == b"BZh":
+            return "tar.bz2"
+        return "zip" if path.lower().endswith(".zip") else "tar.bz2"
+
     def _extract(self, tar_path, progress_cb=None):
         """解压 tar.bz2 到模型目录，保留相对子目录结构。
 
@@ -240,7 +254,9 @@ class SherpaTTS:
         dict/ 等**多级子目录必须原样保留**（早期实现用 basename 平铺，
         把 phontab/词典文件全写丢在根目录，导致合成报错）。
         """
-        if tar_path.lower().endswith(".zip"):
+        # 按文件头嗅探格式（扩展名不可信：导入/下载的临时文件名可能不符）
+        fmt = self._detect_archive_format(tar_path)
+        if fmt == "zip":
             return self._extract_zip(tar_path, progress_cb)
         try:
             import tarfile

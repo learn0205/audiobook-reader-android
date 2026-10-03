@@ -916,7 +916,13 @@ class AudioBookApp(App, WakelockFgMixin):
                     try:
                         import sherpa_tts as _sh
                         part = os.path.join(self.user_data_dir,
-                                            "import_model.tar.bz2")
+                                            "import_model.bin")
+                        try:   # 清掉旧版失败残留的 import_model.tar.bz2
+                            stale = part[:-4] + ".tar.bz2"
+                            if os.path.isfile(stale):
+                                os.remove(stale)
+                        except OSError:
+                            pass
                         self._copy_uri_to_file(uri, part)
                         inst = _sh.get_instance(self.user_data_dir)
                         ok = inst.import_from_file(part)
