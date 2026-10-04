@@ -548,6 +548,17 @@ class SherpaTTS:
             self._failed = True
             raise RuntimeError(
                 "离线引擎上次加载时崩溃，已临时禁用（可在设置里重新启用）")
+        # 内存诊断：区分 OOM 被系统杀 与 原生不兼容崩溃
+        try:
+            from jnius import autoclass
+            act = autoclass("org.kivy.android.PythonActivity").mActivity
+            mgr = act.getSystemService(act.ACTIVITY_SERVICE)
+            mi = mgr.getMemoryInfo()
+            _crumb(self.data_dir,
+                   "内存: avail=%.0fMB total=%.0fMB"
+                   % (mi.availMem / 1048576.0, mi.totalMem / 1048576.0))
+        except Exception:
+            pass
         open(pending, "w").close()
         _crumb(self.data_dir, "SherpaOnnxCreateOfflineTts 开始（若此后无日志即为原生崩溃）")
         handle = lib.SherpaOnnxCreateOfflineTts(ctypes.byref(cfg))

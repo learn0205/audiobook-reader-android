@@ -3117,7 +3117,7 @@ class AudioBookApp(App, WakelockFgMixin):
             if os.path.isfile(_sp_log):
                 with open(_sp_log, encoding="utf-8") as f:
                     _ls = [l for l in f.read().splitlines() if l.strip()]
-                _sp_tail = _ls[-1][:60] if _ls else "(空)"
+                _sp_tail = " ▏".join(l[:46] for l in _ls[-3:]) if _ls else "(空)"
         except Exception:
             _sp_tail = "(读取失败)"
         _diag_text = (
