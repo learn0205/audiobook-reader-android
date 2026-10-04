@@ -75,6 +75,17 @@ def get_state():
     return dict(_state)
 
 
+def _crumb(data_dir, msg):
+    """加载面包屑：追加写入 sherpa/load.log，native 崩溃后仍能定位死在哪步。"""
+    try:
+        p = os.path.join(data_dir, "sherpa", "load.log")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(time.strftime("[%H:%M:%S] ") + msg + "\n")
+    except Exception:
+        pass
+
+
 class SherpaTTS:
     """Kokoro 离线合成器（进程内单例，懒加载）。"""
 
@@ -416,8 +427,11 @@ class SherpaTTS:
                     lib_dir = p
                     break
         if not lib_dir:
+            _crumb(self.data_dir, "找不到 libsherpa-onnx-c-api.so")
             raise RuntimeError("找不到 libsherpa-onnx-c-api.so（v1.11.3）")
+        _crumb(self.data_dir, "加载 .so: " + lib_dir)
         lib = ctypes.CDLL(os.path.join(lib_dir, "libsherpa-onnx-c-api.so"))
+        _crumb(self.data_dir, "CDLL ok")
 
         # ---- v1.11.3 c-api.h 结构体（字段顺序敏感）----
         class SherpaOnnxOfflineTtsVitsModelConfig(ctypes.Structure):
@@ -494,13 +508,18 @@ class SherpaTTS:
         cfg.rule_fsts = self._rule_fsts().encode()
         cfg.max_num_sentences = 1
         cfg.silence_scale = 1.0
+        _crumb(self.data_dir, "SherpaOnnxCreateOfflineTts 开始（若此后无日志即为原生崩溃）")
         handle = lib.SherpaOnnxCreateOfflineTts(ctypes.byref(cfg))
         if not handle:
+            _crumb(self.data_dir, "create 返回空")
             raise RuntimeError("sherpa-onnx 初始化失败")
+        _crumb(self.data_dir, "create ok")
         self._lib = lib
         self._tts = handle
         self._sample_rate = lib.SherpaOnnxOfflineTtsSampleRate(handle)
         self._num_speakers = lib.SherpaOnnxOfflineTtsNumSpeakers(handle)
+        _crumb(self.data_dir, "加载完成 speakers=%d rate=%d"
+               % (self._num_speakers, self._sample_rate))
         print("[sherpa] Kokoro 离线引擎就绪（安卓 v1.11.3）：说话人 %d"
               % self._num_speakers)
 

@@ -956,10 +956,21 @@ class ReaderTTS:
         sys_voices = [dict(v, source="android") for v in voices]
         self._merge_and_report(sys_voices)
 
+    @staticmethod
+    def _mandarin_or_english(v):
+        """音源白名单：只保留 普通话中文（zh-CN*）与英文（en-*）。
+        系统引擎的粤语（yue-*）、其他语言音色一律不进列表。"""
+        locale = str(v.get("locale", ""))
+        name = str(v.get("name", ""))
+        return (locale.startswith("zh-CN") or locale.startswith("en")
+                or name.startswith("kokoro:"))
+
     def _merge_and_report(self, sys_voices):
         # 系统音色补上 source 标记（防御式：即便调用方没标也保证有）
         tagged = [dict(v, source="android") if "source" not in v else v
                   for v in sys_voices]
+        # 统一过滤：普通话中文 + 英文（系统引擎里的粤语/其他语言剔除）
+        tagged = [v for v in tagged if self._mandarin_or_english(v)]
         edge_voices = self._edge_voices
         # 离线音色（Kokoro）已就绪则并入；source=edge 让路由走 EdgeTTS
         # 后端 —— 它内部会按 kokoro: 前缀把合成转给 sherpa_tts
