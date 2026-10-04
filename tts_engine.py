@@ -635,7 +635,24 @@ class EdgeTTS:
             # 命中缓存则跳过网络合成
             if not (self._cache_dir and os.path.exists(path)):
                 if self._is_kokoro(voice):
-                    self._kokoro_synth(sentence, voice, path, rate)
+                    try:
+                        self._kokoro_synth(sentence, voice, path, rate)
+                    except Exception as kerr:
+                        # 离线引擎失败 → 这一句降级为 Edge 全局音色继续读
+                        # （绝不跳句：否则整本书会被静默跳完）
+                        self._kokoro_fallback_voice = getattr(
+                            self, "_kokoro_fallback_voice",
+                            "zh-CN-XiaoxiaoNeural")
+                        fbv = self._kokoro_fallback_voice
+                        fbr, fbp, fbv2 = self._synth_params()
+                        path = self._cache_path(
+                            chr(1) + sentence,
+                            params=(fbv, fbr, fbp, fbv2))
+                        if not (self._cache_dir and os.path.exists(path)):
+                            edge_tts_client.synthesize_to_file(
+                                sentence, fbv, path, rate=fbr, pitch=fbp,
+                                volume=fbv2)
+                        self.on_error("离线合成失败已回退在线音色：%s" % kerr)
                 else:
                     edge_tts_client.synthesize_to_file(
                         sentence, voice, path, rate=rate, pitch=pitch,

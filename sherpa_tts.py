@@ -462,6 +462,35 @@ class SherpaTTS:
         _crumb(self.data_dir, "加载 .so: " + lib_dir)
         lib = ctypes.CDLL(os.path.join(lib_dir, "libsherpa-onnx-c-api.so"))
         _crumb(self.data_dir, "CDLL ok")
+        try:
+            from jnius import autoclass
+            Build = autoclass("android.os.Build")
+            ver = autoclass("android.os.Build$VERSION")
+            _crumb(self.data_dir, "设备: %s | API%d | %s | RAM见上"
+                   % (str(Build.MODEL)[:24], int(ver.SDK_INT),
+                      str(Build.SUPPORTED_ABIS[0])[:16]))
+        except Exception:
+            pass
+        try:
+            st = os.statvfs(self.data_dir)
+            free_gb = st.f_bavail * st.f_frsize / 1073741824.0
+            _crumb(self.data_dir, "磁盘剩余 %.1fGB" % free_gb)
+        except Exception:
+            pass
+        # espeak 关键文件（初始化时会读取，截断→abort）
+        try:
+            e_dir = self._data_sub("espeak-ng-data")
+            for key in ("phontab", "phondata", "phonindex", "intonations"):
+                p = os.path.join(e_dir, key)
+                sz = os.path.getsize(p) if os.path.isfile(p) else -1
+                _crumb(self.data_dir, "espeak/%s=%d" % (key, sz))
+        except Exception:
+            pass
+        # rule_fsts 存在性
+        try:
+            _crumb(self.data_dir, "rule_fsts=%s" % ("Y" if self._rule_fsts() else "N"))
+        except Exception:
+            pass
 
         # ---- v1.11.3 c-api.h 结构体（字段顺序敏感）----
         class SherpaOnnxOfflineTtsVitsModelConfig(ctypes.Structure):
@@ -637,6 +666,8 @@ class SherpaTTS:
 
     def _synth_android(self, text, sid, path, speed):
         lib = self._lib
+        _crumb(self.data_dir, "合成: sid=%d len=%d speed=%.2f"
+               % (sid, len(text), speed))
         lib.SherpaOnnxOfflineTtsGenerate.restype = ctypes.c_void_p
         lib.SherpaOnnxOfflineTtsGenerate.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32, ctypes.c_float]
@@ -656,6 +687,7 @@ class SherpaTTS:
         self._sample_rate = rate
         samples = ctypes.cast(samples_ptr, ctypes.POINTER(ctypes.c_float))[:n]
         lib.SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio)
+        _crumb(self.data_dir, "合成完成: %d样本 %dHz" % (n, rate))
         if not samples:
             raise RuntimeError("离线合成返回空音频")
         self._write_wav(samples, path)

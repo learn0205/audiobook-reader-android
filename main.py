@@ -915,6 +915,16 @@ class AudioBookApp(App, WakelockFgMixin):
                 def _import_model():
                     try:
                         import sherpa_tts as _sh
+                        free_gb = 0.0
+                        try:
+                            st = os.statvfs(self.user_data_dir)
+                            free_gb = st.f_bavail * st.f_frsize / 1073741824.0
+                        except Exception:
+                            pass
+                        if free_gb and free_gb < 1.2:
+                            self._post_to_main(lambda: self._toast(
+                                "手机剩余空间只有 %.1fGB，导入需要约1GB，请先清理" % free_gb))
+                            return
                         part = os.path.join(self.user_data_dir,
                                             "import_model.bin")
                         try:   # 清掉旧版失败残留的 import_model.tar.bz2
