@@ -129,7 +129,6 @@ else:                                        # 字体缺失时给个明确提示
 REQUEST_PICK_BOOK = 1001
 REQUEST_EXPORT_CFG = 1002   # 导出书签/进度备份（ACTION_CREATE_DOCUMENT）
 REQUEST_EXPORT_LOG = 1003   # 导出诊断日志（ACTION_CREATE_DOCUMENT）
-REQUEST_PICK_MODEL = 1004   # 选择离线语音包（.tar.bz2）导入
 
 KV = """
 # ============================================================
@@ -603,11 +602,6 @@ class AudioBookApp(App, WakelockFgMixin):
             user_data_dir=self.user_data_dir,
         )
         self._engine.start()
-        # 离线语音包（Kokoro）已下载过 → 音色列表追加离线音色
-        try:
-            self._engine.refresh_kokoro_voices()
-        except Exception:
-            pass
         self._engine.set_speed(float(self._config.get("speed", 1.0)))
         self._engine.set_pitch(int(self._config.get("pitch", 0)))
         self._engine.set_intonation(bool(self._config.get("intonation", True)))
@@ -879,7 +873,7 @@ class AudioBookApp(App, WakelockFgMixin):
     def _on_activity_result(self, request_code, result_code, intent):
         """SAF 选择器返回：书本 → 复制后打开；.json → 备份导入；导出码 → 落盘。"""
         if request_code not in (REQUEST_PICK_BOOK, REQUEST_EXPORT_CFG,
-                                REQUEST_EXPORT_LOG, REQUEST_PICK_MODEL):
+                                REQUEST_EXPORT_LOG):
             return
         try:
             from android import activity
@@ -910,51 +904,6 @@ class AudioBookApp(App, WakelockFgMixin):
             except Exception:
                 pass
             name = (self._query_display_name(resolver, uri) if resolver else "") or ""
-            if request_code == REQUEST_PICK_MODEL:
-                # 离线语音包本地导入：复制到私有目录后后台解压（数百MB，放线程）
-                def _import_model():
-                    try:
-                        import sherpa_tts as _sh
-                        free_gb = 0.0
-                        try:
-                            st = os.statvfs(self.user_data_dir)
-                            free_gb = st.f_bavail * st.f_frsize / 1073741824.0
-                        except Exception:
-                            pass
-                        if free_gb and free_gb < 1.2:
-                            self._post_to_main(lambda: self._toast(
-                                "手机剩余空间只有 %.1fGB，导入需要约1GB，请先清理" % free_gb))
-                            return
-                        part = os.path.join(self.user_data_dir,
-                                            "import_model.bin")
-                        try:   # 清掉旧版失败残留的 import_model.tar.bz2
-                            stale = part[:-4] + ".tar.bz2"
-                            if os.path.isfile(stale):
-                                os.remove(stale)
-                        except OSError:
-                            pass
-                        self._copy_uri_to_file(uri, part)
-                        inst = _sh.get_instance(self.user_data_dir)
-                        ok = inst.import_from_file(part)
-                        try:
-                            os.remove(part)
-                        except OSError:
-                            pass
-
-                        def _apply():
-                            try:
-                                self._engine.refresh_kokoro_voices()
-                            except Exception:
-                                pass
-                            self._toast("离线语音包导入成功，音色列表已新增 Kokoro 离线音色"
-                                        if ok else
-                                        "语音包导入失败：" + _sh.get_state()["message"])
-                        self._post_to_main(_apply)
-                    except Exception as err:
-                        self._post_to_main(lambda: self._toast(
-                            "语音包导入失败：%s" % err))
-                threading.Thread(target=_import_model, daemon=True).start()
-                return
             if name.lower().endswith(".json"):
                 data = self._read_uri_text(uri)
                 self._post_to_main(lambda: self._import_backup(data))
@@ -969,24 +918,6 @@ class AudioBookApp(App, WakelockFgMixin):
         except Exception as err:
             # 走 _on_error：既弹 toast，也记进「自检信息 → 最近错误」（便于截图定位）
             self._on_error(f"读取所选文件失败：{err}")
-
-    def _pick_model_file(self):
-        """系统文件选择器：挑离线语音包 .tar.bz2（QQ 接收后移到下载目录）。"""
-        if not self._android():
-            self._toast("桌面环境请把 tar.bz2 放到应用数据目录后重启")
-            return
-        try:
-            from android import activity
-            from jnius import autoclass
-            Intent = autoclass("android.content.Intent")
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-            intent.addCategory(Intent.CATEGORY_OPENABLE)
-            intent.setType("*/*")
-            activity.bind(on_activity_result=self._on_activity_result)
-            PythonActivity.mActivity.startActivityForResult(intent, REQUEST_PICK_MODEL)
-        except Exception as err:
-            self._toast(f"打开文件选择器失败：{err}")
 
     def _import_backup(self, data):
         """恢复书签/进度备份（必须在 Kivy 主线程：会刷新界面）。"""
@@ -1717,9 +1648,8 @@ class AudioBookApp(App, WakelockFgMixin):
         rm = None if force_new else role_config.load_map(
             self.user_data_dir, self._book_key)
         if rm is None:
-            rm = role_config.auto_map(
-                self._book_key, characters, self._voice_template,
-                prefer_offline=self._role_prefer_offline())
+            rm = role_config.auto_map(self._book_key, characters,
+                                      self._voice_template)
             role_config.save_map(self.user_data_dir, rm)
         self._role_map = rm
         if self._multi_role_enabled():
@@ -1747,55 +1677,23 @@ class AudioBookApp(App, WakelockFgMixin):
     def _multi_role_btn_text(self):
         return "已开启" if self._multi_role_enabled() else "已关闭"
 
-    def _role_prefer_offline(self):
-        """角色自动映射是否优先用离线音色（离线语音包就绪才生效）。"""
-        if not bool(self._config.get("role_voice_offline", True)):
-            return False
-        try:
-            import sherpa_tts as _sh
-            inst = _sh.get_instance(self.user_data_dir)
-            return inst.model_ready() and not inst.disabled()
-        except Exception:
-            return False
-
-    def _role_offline_btn_text(self):
-        return ("离线优先" if bool(self._config.get("role_voice_offline", True))
-                else "在线优先")
-
     def _warn_multi_role_backend(self, voice_name, force=False):
-        """选了系统音色时提示：多角色只在 Edge 在线 / Kokoro 离线音色下生效。
+        """选了系统音色时提示：多角色只在 Edge 在线音色下生效。
 
         系统引擎不支持逐句换音色——全局选系统音色时，即使多角色开着、
         角色也绑了编号，整本书仍是同一个声音（这是引擎能力边界，不是 bug）。
         """
         if not (self._multi_role_enabled() and self._role_map is not None):
             return
-        is_kokoro = isinstance(voice_name, str) and \
-            voice_name.startswith("kokoro:")
-        # 系统音色：不在已合并音色列表的 edge 分组里、也不是 kokoro
+        # 系统音色：不在已合并音色列表的 edge 分组里
         src = None
         try:
             src = self._engine._voice_source_of(voice_name)
         except Exception:
             pass
-        if force or (not is_kokoro and src == "android"):
-            self._toast("提示：多角色朗读需选择 Edge 在线或 Kokoro 离线音色"
+        if force or src == "android":
+            self._toast("提示：多角色朗读需选择 Edge 在线音色"
                         "（当前是系统音色，整本书会是同一个声音）")
-
-    def _toggle_role_offline(self, btn=None):
-        """切换角色自动配音的音源优先级；重新识别本书角色以重新分配编号。"""
-        cur = bool(self._config.get("role_voice_offline", True))
-        self._config.set("role_voice_offline", not cur)
-        self._config.save()
-        if btn is not None:
-            btn.text = self._role_offline_btn_text()
-        if self._paragraphs:
-            self._toast("已切换为%s，正在重新识别角色…"
-                        % ("离线优先" if not cur else "在线优先"))
-            self._scan_roles_async(force_new=True)
-        else:
-            self._toast("已切换为%s（打开书籍后识别角色时生效）"
-                        % ("离线优先" if not cur else "在线优先"))
 
     def _toggle_multi_role(self, btn=None):
         enabled = not self._multi_role_enabled()
@@ -2059,10 +1957,7 @@ class AudioBookApp(App, WakelockFgMixin):
         self._preview_player = player
 
     def _preview_voice(self, voice):
-        """后台合成一句固定文本并播放（离线/在线音色都支持）。
-
-        离线引擎首次加载要几十秒——点按后先 toast 提示，合成完自动播放。
-        """
+        """后台合成一句固定文本并播放（试听 Edge 音色效果）。"""
         voice = str(voice or "")
         if not voice:
             self._toast("请先选择音色")
@@ -2073,28 +1968,16 @@ class AudioBookApp(App, WakelockFgMixin):
 
         def _work():
             try:
-                if voice.startswith("kokoro:"):
-                    import sherpa_tts as _sh
-                    inst = _sh.get_instance(self.user_data_dir)
-                    if inst.disabled():
-                        self._post_to_main(lambda: self._toast(
-                            "离线引擎已被禁用，请先在设置里重新启用"))
-                        return
-                    path = os.path.join(self.user_data_dir, "preview.wav")
-                    sid = int(voice.split(":", 1)[1])
-                    inst.synth_to_file(self._PREVIEW_TEXT, sid, path,
-                                       speed=1.0)
-                else:
-                    import edge_tts_client
-                    path = os.path.join(self.user_data_dir, "preview.mp3")
-                    if os.path.exists(path):
-                        try:
-                            os.remove(path)
-                        except OSError:
-                            pass
-                    edge_tts_client.synthesize_to_file(
-                        self._PREVIEW_TEXT, voice, path,
-                        rate="+0%", pitch="+0Hz", volume="+0%")
+                import edge_tts_client
+                path = os.path.join(self.user_data_dir, "preview.mp3")
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                edge_tts_client.synthesize_to_file(
+                    self._PREVIEW_TEXT, voice, path,
+                    rate="+0%", pitch="+0Hz", volume="+0%")
 
                 def _play():
                     if os.path.exists(path):
@@ -2105,8 +1988,6 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._post_to_main(lambda: self._toast(
                     "试听生成失败：%s" % msg[:60]))
         threading.Thread(target=_work, daemon=True).start()
-        if voice.startswith("kokoro:"):
-            self._toast("正在生成试听…（离线引擎首次加载需等待片刻）")
 
     def _edge_voice_choices(self, current=""):
         """Edge 音色下拉选项：返回 (标签列表, 标签→ShortName 映射)。
@@ -2645,6 +2526,11 @@ class AudioBookApp(App, WakelockFgMixin):
         """音色列表就绪：记进配置备查，设置面板会用到。"""
         self._voice_list = voices
         current = str(self._config.get("voice_name", ""))
+        if current.startswith("kokoro:"):
+            # 离线引擎已移除：老版本存的 kokoro 音色回落到系统默认音色
+            current = ""
+            self._config.set("voice_name", "")
+            self._config.save()
         if current:
             self._engine.set_voice(current)
 
@@ -3276,15 +3162,6 @@ class AudioBookApp(App, WakelockFgMixin):
             _bat_s = ("已允许" if _bat else "未允许") if _bat is not None else "未知"
         except Exception:
             _bat_s = "未知"
-        try:
-            _sp_log = os.path.join(self.user_data_dir, "sherpa", "load.log")
-            _sp_tail = "(无)"
-            if os.path.isfile(_sp_log):
-                with open(_sp_log, encoding="utf-8") as f:
-                    _ls = [l for l in f.read().splitlines() if l.strip()]
-                _sp_tail = " ▏".join(l[:46] for l in _ls[-3:]) if _ls else "(空)"
-        except Exception:
-            _sp_tail = "(读取失败)"
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
@@ -3298,7 +3175,6 @@ class AudioBookApp(App, WakelockFgMixin):
             "正文 %s\n"
             "记忆 书=%s  断点=%s\n"
             "崩溃 %s\n"
-            "离线加载 %s\n"
             "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                _utter_ok,
@@ -3318,7 +3194,6 @@ class AudioBookApp(App, WakelockFgMixin):
                _layout,
                _book, _pos_s,
                (_crash_last or "无"),
-               _sp_tail,
                (str(self._last_error)[:120] or "无"))
         )
         _diag = ABDimLabel(text=_diag_text, size_hint_y=None, height=dp(92),
@@ -3397,18 +3272,6 @@ class AudioBookApp(App, WakelockFgMixin):
         multi_row.add_widget(btn_multi)
         box.add_widget(self._auto_row(multi_row, dp(46)))
 
-        # ---- 角色自动配音音源：离线(Kokoro)优先 / 在线(Edge)优先 ----
-        src_row = BoxLayout(size_hint_y=None, spacing=dp(8))
-        src_row.add_widget(self._auto_label("角色自动配音音源",
-                                            font_size="13sp",
-                                            min_height=dp(24)))
-        btn_src = ABButton(text=self._role_offline_btn_text(),
-                           size_hint_x=None, width=dp(96))
-        btn_src.bind(on_release=lambda *_: self._toggle_role_offline(btn_src))
-        self._clip_text(btn_src)
-        src_row.add_widget(btn_src)
-        box.add_widget(self._auto_row(src_row, dp(46)))
-
         btn_roles = ABButton(text="角色管理（本书 · 人名绑定音色编号）",
                              size_hint_y=None, height=dp(44))
         btn_roles.bind(on_release=lambda *_: self._show_role_panel(popup))
@@ -3418,72 +3281,6 @@ class AudioBookApp(App, WakelockFgMixin):
                            size_hint_y=None, height=dp(44))
         btn_tpl.bind(on_release=lambda *_: self._show_template_panel(popup))
         box.add_widget(self._safe_text(btn_tpl, min_height=dp(44)))
-
-        # ---- 离线语音包（Kokoro·开源·中英双语·约348MB）----
-        try:
-            import sherpa_tts as _sherpa
-            _st = _sherpa.get_state()
-            _inst = _sherpa.get_instance(self.user_data_dir)
-            if _inst.model_ready():
-                _line = "离线语音包：已就绪（Kokoro·103音色·完全离线）"
-            elif _st["status"] == "downloading":
-                _line = "离线语音包：下载中… %s" % (_st["message"] or "")
-            elif _st["status"] == "error":
-                _line = "离线语音包：上次失败（%s）" % (_st["message"][:36] or "未知")
-            else:
-                _line = "离线语音包：未下载（Kokoro·103音色·中英·约348MB）"
-            box.add_widget(self._auto_label("离线语音包（Kokoro）", font_size="13sp",
-                                            min_height=dp(24)))
-            box.add_widget(self._auto_label(_line, font_size="12sp",
-                                            min_height=dp(22)))
-            if _inst.disabled():
-                box.add_widget(self._auto_label(
-                    "离线引擎上次加载失败，已临时禁用（在线音色不受影响；"
-                    "上次失败原因见下方「离线加载」日志）",
-                    font_size="12sp", min_height=dp(22)))
-                btn_re = ABButton(text="重新启用离线引擎（再次尝试加载）",
-                                  size_hint_y=None, height=dp(44))
-
-                def _re_enable(*_):
-                    _inst.re_enable()
-                    self._toast("已重新启用，下次播放离线音色时再次尝试加载")
-                    popup.dismiss()
-                btn_re.bind(on_release=_re_enable)
-                box.add_widget(self._safe_text(btn_re, min_height=dp(44)))
-            if not _inst.model_ready() and _st["status"] != "downloading":
-                btn_dl = ABButton(text="下载离线语音包（下载后完全离线可用）",
-                                  size_hint_y=None, height=dp(44))
-
-                def _start_dl(*_):
-                    popup.dismiss()
-                    self._toast("开始下载离线语音包…完成后自动加入音色列表")
-
-                    def _done(ok, msg):
-                        def _apply():
-                            try:
-                                self._engine.refresh_kokoro_voices()
-                            except Exception:
-                                pass
-                            self._toast("离线语音包就绪，音色列表已新增 Kokoro 离线音色"
-                                        if ok else "离线语音包下载失败：" + msg)
-                        self._post_to_main(_apply)
-
-                    import sherpa_tts as _sh2
-                    _sh2.download_async(self.user_data_dir, done_cb=_done)
-
-                btn_dl.bind(on_release=_start_dl)
-                box.add_widget(self._safe_text(btn_dl, min_height=dp(44)))
-                btn_import = ABButton(text="从本地导入语音包（电脑用QQ传 .tar.bz2 到手机后选它）",
-                                      size_hint_y=None, height=dp(44))
-
-                def _pick_model(*_):
-                    popup.dismiss()
-                    self._pick_model_file()
-
-                btn_import.bind(on_release=_pick_model)
-                box.add_widget(self._safe_text(btn_import, min_height=dp(44)))
-        except Exception:
-            pass
 
         # ---- 主题（深色 / 浅色，点击即时切换并记忆）----
         btn_theme = ABButton(

@@ -1001,7 +1001,7 @@ def test_voice_editor_opens():
     opened = False
     try:
         app._voice_param_editor(
-            title="测试编辑器", cur_voice="kokoro:3", cur_pitch=0,
+            title="测试编辑器", cur_voice="zh-CN-XiaoxiaoNeural", cur_pitch=0,
             cur_rate=1.0, on_save=lambda *a: None)
         opened = True
     except Exception as e:
