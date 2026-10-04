@@ -3270,7 +3270,8 @@ class AudioBookApp(App, WakelockFgMixin):
                                             min_height=dp(22)))
             if _inst.disabled():
                 box.add_widget(self._auto_label(
-                    "离线引擎上次加载时崩溃，已临时禁用（在线音色不受影响）",
+                    "离线引擎上次加载失败，已临时禁用（在线音色不受影响；"
+                    "上次失败原因见下方「离线加载」日志）",
                     font_size="12sp", min_height=dp(22)))
                 btn_re = ABButton(text="重新启用离线引擎（再次尝试加载）",
                                   size_hint_y=None, height=dp(44))

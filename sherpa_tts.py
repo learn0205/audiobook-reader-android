@@ -122,14 +122,28 @@ class SherpaTTS:
         try:
             ok = self._download_github(tar_path, progress_cb)
             if ok and self._extract(tar_path):
+                self._on_pack_complete()
                 return True
             # GitHub 失败 → HF 镜像逐文件
             set_state("downloading", "GitHub 下载失败，改用镜像源…", None)
             ok = self._download_hf(progress_cb)
+            if ok:
+                self._on_pack_complete()
             return ok
         except Exception as err:
             set_state("error", "下载失败：%s" % err)
             return False
+
+    def _on_pack_complete(self):
+        """语音包就绪（新下载/重新导入）→ 清掉旧的熔断与崩溃标记，
+        允许引擎重新加载（之前因包不完整被禁用的场景）。"""
+        self.re_enable()
+        self._failed = False
+        self._failed_msg = ""
+        try:
+            os.remove(os.path.join(self.data_dir, "sherpa", "pending_load"))
+        except OSError:
+            pass
 
     def _download_github(self, tar_path, progress_cb):
         """curl 断点续传下载 tar.bz2（安卓上没有 curl 时退回 urllib）。"""
@@ -238,6 +252,8 @@ class SherpaTTS:
                     if progress_cb and total:
                         progress_cb(min(1.0, copied / total) * 0.5)
             ok = self._extract(tar_path, progress_cb)
+            if ok:
+                self._on_pack_complete()
             if ok and progress_cb:
                 progress_cb(1.0)
             return ok
@@ -359,6 +375,13 @@ class SherpaTTS:
         with self._load_lock:
             if self._tts is not None or self._failed:
                 return self._tts
+            # 熔断已触发（上次加载失败/崩溃被禁用）→ 直接给可读错误，
+            # 绝不再碰原生库（设置里「重新启用」会清掉 disabled 再试）
+            if self.disabled():
+                self._failed = True
+                self._failed_msg = ("离线引擎上次加载失败，已临时禁用"
+                                    "（可在设置里重新启用）")
+                return None
             if not self.model_ready():
                 self._failed = True
                 self._failed_msg = "离线语音包未下载或未导入"
@@ -420,6 +443,23 @@ class SherpaTTS:
                 ("date-zh.fst", "number-zh.fst", "phone-zh.fst")]
         return ",".join(f for f in fsts if f)
 
+    def _lexicon_files(self):
+        """lexicon 词素文件列表（逗号分隔，sherpa-onnx 支持多文件）。
+
+        ⚠️ 关键：kokoro 多语模型（v1.0/v1.1）在 v1.11.3 的实现里
+        **强制要求 lexicon 非空**——offline-tts-kokoro-impl.h 会直接抛
+        C++ 异常「please pass --kokoro-lexicon and --kokoro-dict-dir」，
+        而 v1.11.3 的 SherpaOnnxCreateOfflineTts **没有 try/catch**，
+        未捕获异常 → std::terminate → abort → 整个 App 进程闪退。
+        安卓端此前把 lexicon 传成空字符串，正是「选离线音色必崩、
+        崩后熔断禁用、重新启用又崩」的死循环根源。
+        中文小说朗读主用 lexicon-zh.txt；英文词再补 lexicon-us-en.txt
+        （混排文本里的人名/单词发音更准），按实际存在与否拼接。
+        """
+        files = [self._data_sub(f) for f in
+                 ("lexicon-zh.txt", "lexicon-us-en.txt", "lexicon-gb-en.txt")]
+        return ",".join(f for f in files if f)
+
     def _load_desktop(self):
         import sherpa_onnx
         kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
@@ -428,7 +468,7 @@ class SherpaTTS:
             tokens=self._data_sub("tokens.txt"),
             data_dir=self._data_sub("espeak-ng-data"),
             dict_dir=self._data_sub("dict"),
-            lexicon=self._data_sub("lexicon-zh.txt"),
+            lexicon=self._lexicon_files(),
         )
         config = sherpa_onnx.OfflineTtsConfig(
             model=sherpa_onnx.OfflineTtsModelConfig(
@@ -554,7 +594,9 @@ class SherpaTTS:
         kokoro_cfg.data_dir = self._data_sub("espeak-ng-data").encode()
         kokoro_cfg.length_scale = 1.0
         kokoro_cfg.dict_dir = self._data_sub("dict").encode()
-        kokoro_cfg.lexicon = b""
+        # ⚠️ lexicon 绝不能为空：多语模型实现里 lexicon 为空会抛未捕获的
+        # C++ 异常 → 整个进程 abort（见 _lexicon_files 的说明）
+        kokoro_cfg.lexicon = self._lexicon_files().encode()
         model_cfg = SherpaOnnxOfflineTtsModelConfig()
         model_cfg.vits = vits_cfg
         model_cfg.matcha = matcha_cfg
@@ -577,23 +619,43 @@ class SherpaTTS:
             self._failed = True
             raise RuntimeError(
                 "离线引擎上次加载时崩溃，已临时禁用（可在设置里重新启用）")
-        # 内存诊断：区分 OOM 被系统杀 与 原生不兼容崩溃
+        # 内存诊断 + 内存闸门：加载 310MB 模型至少要 ~600MB 可用内存，
+        # 不够时给出可读错误而不是赌 OOM（进程被系统杀 = 整个 App 闪退）
         try:
             from jnius import autoclass
             act = autoclass("org.kivy.android.PythonActivity").mActivity
             mgr = act.getSystemService(act.ACTIVITY_SERVICE)
             mi = mgr.getMemoryInfo()
+            avail_mb = mi.availMem / 1048576.0
             _crumb(self.data_dir,
                    "内存: avail=%.0fMB total=%.0fMB"
-                   % (mi.availMem / 1048576.0, mi.totalMem / 1048576.0))
+                   % (avail_mb, mi.totalMem / 1048576.0))
+            if avail_mb < 600:
+                _crumb(self.data_dir, "可用内存不足，放弃加载")
+                raise RuntimeError(
+                    "可用内存只有 %.0fMB，加载离线引擎至少需要约 600MB"
+                    "——请关闭其他应用后重试" % avail_mb)
+        except RuntimeError:
+            raise
         except Exception:
             pass
         open(pending, "w").close()
         _crumb(self.data_dir, "SherpaOnnxCreateOfflineTts 开始（若此后无日志即为原生崩溃）")
         handle = lib.SherpaOnnxCreateOfflineTts(ctypes.byref(cfg))
         if not handle:
-            _crumb(self.data_dir, "create 返回空")
-            raise RuntimeError("sherpa-onnx 初始化失败")
+            # 返回空 ≠ 原生崩溃：是配置/文件问题被引擎拒绝（有异常被
+            # 引擎日志记录）。清掉 pending 免得下次误判成「原生崩溃」，
+            # 但仍写入 disabled 熔断，避免反复空跑几十秒的加载流程。
+            _crumb(self.data_dir, "create 返回空（配置被拒绝，非崩溃）")
+            try:
+                os.remove(os.path.join(self.data_dir, "sherpa", "pending_load"))
+            except OSError:
+                pass
+            open(os.path.join(self.data_dir, "sherpa", "disabled"), "w").close()
+            self._failed = True
+            raise RuntimeError(
+                "sherpa-onnx 初始化失败（引擎拒绝配置，已临时禁用离线，"
+                "可在设置里重新启用）")
         _crumb(self.data_dir, "create ok")
         try:
             os.remove(os.path.join(self.data_dir, "sherpa", "pending_load"))
@@ -693,12 +755,24 @@ class SherpaTTS:
         self._write_wav(samples, path)
 
     def list_speakers(self):
-        """供音色列表展示：离线1..N（N 为模型说话人数）。"""
+        """供音色列表展示：离线1..N（含说话人名与性别/语言门类）。
+
+        名单来自 voice_template.KOKORO_SPEAKERS（voices.bin 的固定 sid
+        顺序），只做展示格式化，不触发模型加载。
+        """
         if self.disabled():
             return []
+        try:
+            from voice_template import kokoro_label
+        except Exception:
+            kokoro_label = None
         n = self.num_speakers()
-        return [("kokoro:%d" % i, "离线%d号（Kokoro·离线）" % (i + 1))
-                for i in range(n)]
+        out = []
+        for i in range(n):
+            label = ("离线%d号（Kokoro）" % (i + 1) if kokoro_label is None
+                     else kokoro_label(i))
+            out.append(("kokoro:%d" % i, label))
+        return out
 
 
 # ---------------- 进程级单例管理 ----------------
