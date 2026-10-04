@@ -1020,6 +1020,47 @@ def test_voice_editor_opens():
         Clock.tick()
 
 
+def test_ai_roles_logic():
+    """离线 AI 角色分析（纯逻辑部分）：提示词构建 / 输出解析 / 门类映射。
+
+    模型与运行器只在设备上存在，这里只测可离线验证的部分：
+    JSON 解析、正则兜底、解析失败的可读报错、模型校验闸门。
+    """
+    app = shared_app()
+    import tempfile
+    import ai_roles
+    chars = [("张三", "男角色", ["“你们都退下。”"]),
+             ("夏弥", "女角色", ["“喂。”"])]
+    p = ai_roles.build_prompt(chars)
+    check("ai: 提示词含角色与格式要求",
+          "张三" in p and "夏弥" in p and "JSON" in p)
+    r = ai_roles.parse_output(
+        '[{"name":"张三","gender":"男","age":"中年"},'
+        '{"name":"夏弥","gender":"女","age":"少年"}]', chars)
+    check("ai: JSON 输出解析并映射门类",
+          r == {"张三": "中年叔叔", "夏弥": "少女"}, str(r))
+    r2 = ai_roles.parse_output("张三是男的，青年。夏弥：女性、少年。", chars)
+    check("ai: 跑飞输出的正则兜底", r2 == {"张三": "男角色", "夏弥": "少女"},
+          str(r2))
+    try:
+        ai_roles.parse_output("对不起我不知道", chars)
+        check("ai: 解析失败给可读报错", False, "未抛异常")
+    except ai_roles.AIError as e:
+        check("ai: 解析失败给可读报错", "无法解析" in str(e), str(e))
+    d = tempfile.mkdtemp()
+    ok, _why = ai_roles.model_ready(d)
+    check("ai: 未导入模型给可读状态", not ok)
+    os.makedirs(os.path.join(d, "ai"), exist_ok=True)
+    fp = ai_roles.model_path(d)
+    with open(fp, "wb") as f:
+        f.write(b"GGUF" + b"0" * (600 * 1024 * 1024))
+    ok, _why = ai_roles.model_ready(d)
+    check("ai: 合法 GGUF 通过校验", ok)
+    merged = ai_roles.merge_detected(chars, {"张三": "中年叔叔"})
+    check("ai: 未覆盖角色保持原猜测",
+          merged == [("张三", "中年叔叔"), ("夏弥", "女角色")])
+
+
 def test_media_cmd_semantics():
     """外部播放/暂停命令必须**按语义幂等执行**，绝不能反转状态。
 
@@ -1128,6 +1169,7 @@ def main_run():
     test_edge_play_retry()
     test_media_cmd_semantics()
     test_voice_editor_opens()
+    test_ai_roles_logic()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 

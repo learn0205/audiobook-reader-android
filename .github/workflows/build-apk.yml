@@ -56,6 +56,36 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
+      # 离线 AI 角色分析：交叉编译 llama.cpp（v0.5.0）产出 llama-cli，
+      # 改名 libllama-runner.so 随 APK 打包（Android 只解压 lib*.so，
+      # 运行时从 nativeLibraryDir 以独立子进程执行，崩溃不影响主应用）。
+      - name: Build llama.cpp runner (arm64)
+        run: |
+          set -e
+          LLAMA_TAG=v0.5.0
+          curl -fL --retry 5 -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip"
+          mkdir -p /tmp/ndk && unzip -q /tmp/ndk.zip -d /tmp/ndk
+          NDK_DIR=$(find /tmp/ndk -maxdepth 1 -type d -name "android-ndk-*" | head -1)
+          echo "NDK: $NDK_DIR"
+          rm -rf /tmp/llama
+          git clone --depth 1 --branch $LLAMA_TAG https://github.com/ggml-org/llama.cpp /tmp/llama
+          cmake -S /tmp/llama -B /tmp/llama/build-android \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK_DIR/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=ON
+          cmake --build /tmp/llama/build-android --target llama-cli -j4
+          mkdir -p libs/arm64-v8a
+          cp /tmp/llama/build-android/bin/llama-cli libs/arm64-v8a/libllama-runner.so
+          ls -la libs/arm64-v8a/
+          test -f libs/arm64-v8a/libllama-runner.so
+
       # 把本次构建的 commit 短哈希写进 build_info.py，随 APK 一起打包。
       # 这样 App 里能直接看到「装的是哪一版」，不用靠猜。
       - name: Write build info

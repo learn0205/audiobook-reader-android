@@ -55,6 +55,7 @@ from app_wakelock_fg import WakelockFgMixin
 # ---- 多角色朗读（新增模块，全部只增不改）----
 import role_config
 import role_parser
+import ai_roles
 from voice_template import VOICE_FRIENDLY, VoiceTemplate, voice_friendly
 # ⚠️ STATE_STOPPED 也必须导入：_on_state 里用它决定「是否关闭前台服务」。
 #    漏了它会抛 NameError，而异常从按钮回调冒出 → Kivy 重新抛出 → **一点暂停就闪退**。
@@ -129,6 +130,7 @@ else:                                        # 字体缺失时给个明确提示
 REQUEST_PICK_BOOK = 1001
 REQUEST_EXPORT_CFG = 1002   # 导出书签/进度备份（ACTION_CREATE_DOCUMENT）
 REQUEST_EXPORT_LOG = 1003   # 导出诊断日志（ACTION_CREATE_DOCUMENT）
+REQUEST_PICK_AI_MODEL = 1004  # 选择 AI 模型文件（.gguf）导入
 
 KV = """
 # ============================================================
@@ -487,6 +489,7 @@ class AudioBookApp(App, WakelockFgMixin):
         self._role_scan_version = 0   # 扫描版本号：换书/重识别后作废旧线程结果
         self._role_scan_force_new = False  # 重新识别时忽略已有映射文件
         self._role_scan_pending = None     # 后台线程扫完暂存，由 _tick 主线程取用
+        self._ai_running = False          # AI 分析进行中（防重复触发）
 
         # ---- 朗读推进兜底时钟（独立于 Kivy 逐帧时钟，熄屏也能跑） ----
         self._tick_running = False
@@ -873,7 +876,7 @@ class AudioBookApp(App, WakelockFgMixin):
     def _on_activity_result(self, request_code, result_code, intent):
         """SAF 选择器返回：书本 → 复制后打开；.json → 备份导入；导出码 → 落盘。"""
         if request_code not in (REQUEST_PICK_BOOK, REQUEST_EXPORT_CFG,
-                                REQUEST_EXPORT_LOG):
+                                REQUEST_EXPORT_LOG, REQUEST_PICK_AI_MODEL):
             return
         try:
             from android import activity
@@ -904,6 +907,10 @@ class AudioBookApp(App, WakelockFgMixin):
             except Exception:
                 pass
             name = (self._query_display_name(resolver, uri) if resolver else "") or ""
+            if request_code == REQUEST_PICK_AI_MODEL:
+                # AI 模型导入：复制到私有目录（约1.1GB，后台线程 + 进度提示）
+                self._import_ai_model(uri)
+                return
             if name.lower().endswith(".json"):
                 data = self._read_uri_text(uri)
                 self._post_to_main(lambda: self._import_backup(data))
@@ -918,6 +925,155 @@ class AudioBookApp(App, WakelockFgMixin):
         except Exception as err:
             # 走 _on_error：既弹 toast，也记进「自检信息 → 最近错误」（便于截图定位）
             self._on_error(f"读取所选文件失败：{err}")
+
+    # ---------------- 离线 AI 角色分析 ----------------
+    def _pick_ai_model_file(self):
+        """系统文件选择器：挑 AI 模型 .gguf（电脑下载后传到手机再选它）。"""
+        if not self._android():
+            self._toast("桌面环境请把 .gguf 放到应用数据目录 ai/ 下")
+            return
+        try:
+            from android import activity
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("*/*")
+            activity.bind(on_activity_result=self._on_activity_result)
+            PythonActivity.mActivity.startActivityForResult(
+                intent, REQUEST_PICK_AI_MODEL)
+        except Exception as err:
+            self._toast(f"打开文件选择器失败：{err}")
+
+    def _import_ai_model(self, uri):
+        """复制所选 .gguf 到私有目录并校验（约1.1GB，后台线程）。"""
+        self._toast("正在导入 AI 模型（约1.1GB，请勿关闭应用）…")
+
+        def _work():
+            try:
+                part = os.path.join(self.user_data_dir, "ai_model.part")
+                try:
+                    if os.path.isfile(part):
+                        os.remove(part)
+                except OSError:
+                    pass
+                self._copy_uri_to_file(uri, part)
+                try:
+                    ai_roles.import_model(part, self.user_data_dir)
+                    self._post_to_main(lambda: self._toast(
+                        "AI 模型导入成功，可以点「AI 精细识别人物」了"))
+                finally:
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+            except Exception as err:
+                msg = str(err)
+                self._post_to_main(lambda: self._on_error(
+                    "AI 模型导入失败：%s" % msg))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _download_ai_model(self):
+        """App 内下载 AI 模型（hf-mirror 断点续传，后台线程 + 进度 toast）。"""
+        self._toast("开始下载 AI 模型（%s）…" % ai_roles.MODEL_LABEL)
+        self._ai_dl_last = 0
+
+        def _prog(p):
+            now = time.time()
+            if now - getattr(self, "_ai_dl_last", 0) > 20 or p >= 1.0:
+                self._ai_dl_last = now
+                pct = int(p * 100)
+                self._post_to_main(lambda: self._toast(
+                    "AI 模型下载中 %d%%…" % pct))
+
+        def _work():
+            try:
+                ai_roles.download_model(self.user_data_dir,
+                                        progress_cb=_prog)
+                self._post_to_main(lambda: self._toast(
+                    "AI 模型下载完成，可以点「AI 精细识别人物」了"))
+            except Exception as err:
+                msg = str(err)
+                self._post_to_main(lambda: self._on_error(
+                    "AI 模型下载失败：%s" % msg))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _collect_role_samples(self, max_chars=3, max_len=60):
+        """把逐句说话人标注整理成 [(name, 原猜测类别, [对话片段...])]。"""
+        samples = {}
+        for (para_idx, sentence), name in (self._role_speakers or {}).items():
+            lst = samples.setdefault(name, [])
+            if len(lst) < max_chars:
+                s = str(sentence).strip()
+                if s:
+                    lst.append(s[:max_len])
+        guess = {n: c for n, c in (self._role_detected or [])}
+        out = []
+        for name, lines in samples.items():
+            out.append((name, guess.get(name, ""), lines))
+        return out
+
+    def _ai_identify_roles(self):
+        """AI 精细识别人物：后台跑本地模型，成功后按结果重排音色映射。"""
+        if not self._paragraphs:
+            self._toast("请先打开一本书")
+            return
+        if getattr(self, "_ai_running", False):
+            self._toast("AI 分析正在进行中，请稍候")
+            return
+        characters = self._collect_role_samples()
+        if not characters:
+            self._toast("本书还没有识别到角色，无法分析")
+            return
+        ok, reason = ai_roles.model_ready(self.user_data_dir)
+        if not ok:
+            self._on_error("AI 模型未就绪：%s" % reason)
+            return
+        if not self._android():
+            self._toast("AI 分析仅支持安卓设备（桌面无运行器）")
+            return
+        self._ai_running = True
+        self._toast("AI 分析中…（%d 个角色，约1分钟，请勿关闭应用）"
+                    % len(characters))
+
+        def _work():
+            try:
+                result = ai_roles.analyze(self.user_data_dir, characters)
+                self._post_to_main(lambda: self._apply_ai_result(
+                    characters, result))
+            except Exception as err:
+                msg = str(err)
+                self._post_to_main(lambda: self._on_error(
+                    "AI 角色分析失败：%s" % msg))
+            finally:
+                self._ai_running = False
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_ai_result(self, characters, result):
+        """主线程：把 AI 判断的门类写进本书角色映射（保留自定义音色）。"""
+        try:
+            detected = ai_roles.merge_detected(characters, result)
+            self._role_detected = [(n, c) for n, c in detected]
+            rm = role_config.auto_map(self._book_key, detected,
+                                      self._voice_template)
+            # 已有自定义音色的人物不跟随新映射
+            old = self._role_map
+            if old is not None:
+                for entry in old.roles:
+                    if entry.get("custom"):
+                        ne = rm.get(entry.get("name"))
+                        if ne is not None:
+                            ne["custom"] = entry["custom"]
+            self._role_map = rm
+            role_config.save_map(self.user_data_dir, rm)
+            if self._multi_role_enabled():
+                self._engine.set_voice_resolver(self._role_voice_resolver)
+            ai_cnt = sum(1 for n, _c in detected if n in result)
+            self._toast("AI 识别完成：判定了 %d/%d 个角色，多角色配音已重排"
+                        % (ai_cnt, len(detected)))
+        except Exception as err:
+            self._on_error("AI 结果应用失败：%s" % err)
 
     def _import_backup(self, data):
         """恢复书签/进度备份（必须在 Kivy 主线程：会刷新界面）。"""
@@ -1747,9 +1903,13 @@ class AudioBookApp(App, WakelockFgMixin):
         bottom = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
         btn_rescan = ABButton(text="重新识别角色", font_size="12sp")
         btn_rescan.bind(on_release=lambda *_: self._reidentify_roles(popup))
+        btn_ai = ABButton(text="AI 精细识别", font_size="12sp")
+        btn_ai.bind(on_release=lambda *_: (popup.dismiss(),
+                                           self._ai_identify_roles()))
         btn_close = ABPrimaryButton(text="关闭", font_size="12sp")
         btn_close.bind(on_release=lambda *_: popup.dismiss())
         bottom.add_widget(btn_rescan)
+        bottom.add_widget(btn_ai)
         bottom.add_widget(btn_close)
         box.add_widget(bottom)
         popup.content = box
@@ -3281,6 +3441,33 @@ class AudioBookApp(App, WakelockFgMixin):
                            size_hint_y=None, height=dp(44))
         btn_tpl.bind(on_release=lambda *_: self._show_template_panel(popup))
         box.add_widget(self._safe_text(btn_tpl, min_height=dp(44)))
+
+        # ---- 离线 AI 角色分析（可选：导入/下载模型后才能用）----
+        box.add_widget(self._auto_label("离线 AI 角色分析（可选）", font_size="13sp",
+                                        min_height=dp(24)))
+        try:
+            _ai_ok, _ai_reason = ai_roles.model_ready(self.user_data_dir)
+            if _ai_ok:
+                _ai_line = "AI 模型：%s" % _ai_reason
+            else:
+                _ai_line = "AI 模型：%s" % _ai_reason
+            box.add_widget(self._auto_label(_ai_line, font_size="12sp",
+                                            min_height=dp(22)))
+            btn_ai_import = ABButton(text="导入 AI 模型（电脑下载 .gguf 后传手机）",
+                                     size_hint_y=None, height=dp(44))
+            btn_ai_import.bind(on_release=lambda *_: self._pick_ai_model_file())
+            box.add_widget(self._safe_text(btn_ai_import, min_height=dp(44)))
+            btn_ai_dl = ABButton(text="在 App 内下载 AI 模型（%s，需网络）"
+                                      % ai_roles.MODEL_LABEL,
+                                 size_hint_y=None, height=dp(44))
+            btn_ai_dl.bind(on_release=lambda *_: self._download_ai_model())
+            box.add_widget(self._safe_text(btn_ai_dl, min_height=dp(44)))
+        except Exception:
+            pass
+        btn_ai_run = ABPrimaryButton(text="AI 精细识别人物（本书 · 约1分钟）",
+                                     size_hint_y=None, height=dp(44))
+        btn_ai_run.bind(on_release=lambda *_: self._ai_identify_roles())
+        box.add_widget(self._safe_text(btn_ai_run, min_height=dp(44)))
 
         # ---- 主题（深色 / 浅色，点击即时切换并记忆）----
         btn_theme = ABButton(

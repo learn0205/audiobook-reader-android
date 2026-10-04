@@ -49,6 +49,11 @@ icon.filename = %(source.dir)s/icon.png
 # ---------------------------------------------------------------------------
 android.archs = arm64-v8a
 
+# 离线 AI 角色分析（llama.cpp 子进程运行器）：CI 交叉编译 llama-cli 后
+# 改名 libllama-runner.so 放进 libs/arm64-v8a，随 APK 打包；运行时从
+# nativeLibraryDir 以子进程执行（模型文件由应用内导入/下载，约1.1GB）
+android.add_libs_arm64_v8a = libs/arm64-v8a/*.so
+
 # Android 版本：minapi 24 = Android 7.0，target/compile api 34 = Android 14
 # （Google Play 2024 起要求 targetSdk 34+；p4a develop 已兼容）
 android.api = 34
