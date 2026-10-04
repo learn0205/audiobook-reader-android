@@ -987,6 +987,39 @@ def test_edge_play_retry():
         tts_engine._JNIUS_OK = orig_jnius
 
 
+def test_voice_editor_opens():
+    """音色参数编辑器（模板/角色自定义共用）必须能打开。
+
+    回归：曾把 BoxLayout 塞进 _safe_text（它只接受有 text 属性的控件），
+    AttributeError → 点开「音色模板→编辑编号」/「角色→自定义音色」必闪退。
+    """
+    app = shared_app()
+    from kivy.core.window import Window
+    from kivy.uix.popup import Popup
+    from kivy.clock import Clock
+
+    opened = False
+    try:
+        app._voice_param_editor(
+            title="测试编辑器", cur_voice="kokoro:3", cur_pitch=0,
+            cur_rate=1.0, on_save=lambda *a: None)
+        opened = True
+    except Exception as e:
+        check("voice_editor: 打开不抛异常", False, repr(e))
+        return
+    for _ in range(6):
+        Clock.tick()
+    found = None
+    for w in Window.children:
+        if isinstance(w, Popup) and w.title == "测试编辑器":
+            found = w
+            break
+    check("voice_editor: 打开不抛异常", opened and found is not None)
+    if found is not None:
+        found.dismiss()
+        Clock.tick()
+
+
 def test_media_cmd_semantics():
     """外部播放/暂停命令必须**按语义幂等执行**，绝不能反转状态。
 
@@ -1094,6 +1127,7 @@ def main_run():
     test_freeze_detect_and_keepalive()
     test_edge_play_retry()
     test_media_cmd_semantics()
+    test_voice_editor_opens()
     print("TOTAL: %d/%d passed" % (sum(1 for r in RESULTS if r), len(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
 

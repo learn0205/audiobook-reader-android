@@ -2154,7 +2154,7 @@ class AudioBookApp(App, WakelockFgMixin):
         box.add_widget(self._auto_label("音色（点「试听」先听效果再决定）",
                                         font_size="13sp",
                                         min_height=dp(22)))
-        voice_row = BoxLayout(size_hint_y=None, spacing=dp(6))
+        voice_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
         spinner = Spinner(text=cur_label, values=labels or [cur_label],
                           size_hint_x=1, height=dp(44))
         spinner.bind(text=lambda _s, lbl: state.update(
@@ -2165,7 +2165,10 @@ class AudioBookApp(App, WakelockFgMixin):
         btn_preview.bind(on_release=lambda *_: self._preview_voice(
             state["voice"]))
         voice_row.add_widget(btn_preview)
-        box.add_widget(self._safe_text(voice_row, min_height=dp(44)))
+        # ⚠️ 这行是普通布局（没有 text/texture_size 属性），绝不能塞进
+        # _safe_text（那是给 Button/Spinner/Label 等文字控件做自动换行的，
+        # 塞布局进去会 AttributeError → 打开编辑器必闪退）
+        box.add_widget(voice_row)
 
         box.add_widget(self._slider_row(
             "音调(Hz)", -50, 50, state["pitch"],
@@ -3114,6 +3117,10 @@ class AudioBookApp(App, WakelockFgMixin):
             min_height = dp(44)
         if margin is None:
             margin = dp(10)
+        # 布局容器（BoxLayout 等）没有 text/text_size/texture_size 属性，
+        # 套这套排版规则会 AttributeError 闪退 —— 原样放行
+        if not hasattr(w, "text"):
+            return w
         try:
             if w.size_hint_y is not None:      # 原来由父布局拉满 → 改成自己算高度
                 w.size_hint_y = None
