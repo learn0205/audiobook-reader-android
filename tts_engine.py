@@ -186,6 +186,9 @@ class EdgeTTS:
         self._ready = True           # Edge 不需要离线初始化，构造即可用
         self._init_error = ""
         self._user_data_dir = ""     # 由 _set_cache_dir 传入（sherpa 用）
+        # Edge 在线熔断：连续被服务端掐断后，60 秒内直接走离线兜底，
+        # 免得每句都白等 2 次重试（约 5 秒）才失败 —— 听感就是句句卡顿
+        self._edge_down_until = 0.0
 
     def _kokoro_synth(self, sentence, voice, path, rate):
         """离线合成：kokoro:<sid> → sherpa-onnx Kokoro，失败抛异常由上层降级。"""
@@ -220,6 +223,33 @@ class EdgeTTS:
         except (TypeError, ValueError, IndexError):
             n = 0
         return cls._KOKORO_FB_VOICES[max(0, n) % len(cls._KOKORO_FB_VOICES)]
+
+    # ---------------- Edge 在线失败 → Kokoro 离线兜底 ----------------
+    # 按 Edge 音色名猜性别，让回退音色至少性别对得上（Yun* 是男声系，
+    # Xiao* 是女声系；英文男声单列）
+    _EDGE_MALE_HINTS = ("Yunxi", "Yunyang", "Yunjian", "Yunhao", "Yunze",
+                        "Yunfei", "Yunye", "Yunzheng", "Yunfeng", "Yunxia",
+                        "Guy", "Davis", "Andrew", "Brian", "Eric", "Roger",
+                        "Ryan")
+
+    @classmethod
+    def _kokoro_sid_for_edge(cls, voice):
+        """Edge 音色 → 兜底用的 Kokoro 说话人（59=zm_010 男 / 3=zf_001 女，
+        均为官方试听样例音色）。"""
+        v = str(voice or "")
+        if any(h in v for h in cls._EDGE_MALE_HINTS):
+            return 59
+        return 3
+
+    def _kokoro_ready(self):
+        """离线语音包是否可用（已导入且未熔断禁用）。"""
+        try:
+            import sherpa_tts
+            inst = sherpa_tts.get_instance(
+                getattr(self, "_user_data_dir", "") or "")
+            return inst.model_ready() and not inst.disabled()
+        except Exception:
+            return False
 
     # ==================== 生命周期 ====================
     def start(self):
@@ -674,9 +704,39 @@ class EdgeTTS:
                                 volume=fbv2)
                         self.on_error("离线合成失败已回退在线音色：%s" % kerr)
                 else:
-                    edge_tts_client.synthesize_to_file(
-                        sentence, voice, path, rate=rate, pitch=pitch,
-                        volume=volume)
+                    # Edge 在线合成。失败时（被服务端掐断/断网）绝不能
+                    # 静默跳句——一句空过就是听感上的一次"卡顿"，连续
+                    # 失败就是"一直卡顿还报错"。语音包可用时回退离线
+                    # 音色（按 Edge 音色性别挑对应的 Kokoro 说话人）；
+                    # 连续失败后熔断 60 秒，期间直接走离线不再白等重试。
+                    if self._kokoro_ready() and \
+                            time.time() < self._edge_down_until:
+                        fbv = "kokoro:%d" % self._kokoro_sid_for_edge(voice)
+                        path = self._cache_path(
+                            chr(2) + sentence,
+                            params=(fbv, rate, "+0Hz", "+0%"))
+                        if not (self._cache_dir and os.path.exists(path)):
+                            self._kokoro_synth(sentence, fbv, path, rate)
+                    else:
+                        try:
+                            edge_tts_client.synthesize_to_file(
+                                sentence, voice, path, rate=rate, pitch=pitch,
+                                volume=volume)
+                            self._edge_down_until = 0.0
+                        except Exception as eerr:
+                            self._edge_down_until = time.time() + 60.0
+                            if not self._kokoro_ready():
+                                raise
+                            fbv = "kokoro:%d" % self._kokoro_sid_for_edge(
+                                voice)
+                            path = self._cache_path(
+                                chr(2) + sentence,
+                                params=(fbv, rate, "+0Hz", "+0%"))
+                            if not (self._cache_dir and os.path.exists(path)):
+                                self._kokoro_synth(sentence, fbv, path, rate)
+                            self.on_error(
+                                "Edge 在线失败，本句已用离线音色继续：%s"
+                                % str(eerr)[:60])
                 self._prune_cache(keep_path=path)
             if generation != self._generation:
                 return
