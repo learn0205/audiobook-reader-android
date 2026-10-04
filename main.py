@@ -2024,6 +2024,90 @@ class AudioBookApp(App, WakelockFgMixin):
             on_save=_save, on_reset=_reset)
 
     # ---------------- 音色参数编辑器（角色/模板共用） ----------------
+    _PREVIEW_TEXT = "你好，这是这把音色的试听效果，今天天气不错。"
+
+    def _stop_preview_player(self):
+        """停掉并释放上一个试听播放器（重复点试听 / 退出时调用）。"""
+        p = getattr(self, "_preview_player", None)
+        if p is not None:
+            try:
+                p.stop()
+                p.reset()
+                p.release()
+            except Exception:
+                pass
+            self._preview_player = None
+
+    def _play_preview_file(self, path):
+        """主线程：用 MediaPlayer 播放试听音频。"""
+        self._stop_preview_player()
+        from jnius import autoclass
+        MediaPlayer = autoclass("android.media.MediaPlayer")
+        player = MediaPlayer()
+        try:
+            jpath = autoclass("java.lang.String")(path)
+            player.setDataSource(jpath)
+            player.prepare()
+            player.start()
+        except Exception:
+            try:
+                player.release()
+            except Exception:
+                pass
+            self._toast("试听播放失败")
+            return
+        self._preview_player = player
+
+    def _preview_voice(self, voice):
+        """后台合成一句固定文本并播放（离线/在线音色都支持）。
+
+        离线引擎首次加载要几十秒——点按后先 toast 提示，合成完自动播放。
+        """
+        voice = str(voice or "")
+        if not voice:
+            self._toast("请先选择音色")
+            return
+        if not os.path.isdir(self.user_data_dir):
+            self.user_data_dir = "."
+        self._stop_preview_player()
+
+        def _work():
+            try:
+                if voice.startswith("kokoro:"):
+                    import sherpa_tts as _sh
+                    inst = _sh.get_instance(self.user_data_dir)
+                    if inst.disabled():
+                        self._post_to_main(lambda: self._toast(
+                            "离线引擎已被禁用，请先在设置里重新启用"))
+                        return
+                    path = os.path.join(self.user_data_dir, "preview.wav")
+                    sid = int(voice.split(":", 1)[1])
+                    inst.synth_to_file(self._PREVIEW_TEXT, sid, path,
+                                       speed=1.0)
+                else:
+                    import edge_tts_client
+                    path = os.path.join(self.user_data_dir, "preview.mp3")
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                    edge_tts_client.synthesize_to_file(
+                        self._PREVIEW_TEXT, voice, path,
+                        rate="+0%", pitch="+0Hz", volume="+0%")
+
+                def _play():
+                    if os.path.exists(path):
+                        self._play_preview_file(path)
+                self._post_to_main(_play)
+            except Exception as err:
+                msg = str(err)
+                self._post_to_main(lambda: self._toast(
+                    "试听生成失败：%s" % msg[:60]))
+        threading.Thread(target=_work, daemon=True).start()
+        if voice.startswith("kokoro:"):
+            self._toast("正在生成试听…（离线引擎首次加载需等待片刻）")
+
     def _edge_voice_choices(self, current=""):
         """Edge 音色下拉选项：返回 (标签列表, 标签→ShortName 映射)。
 
@@ -2067,13 +2151,21 @@ class AudioBookApp(App, WakelockFgMixin):
                         padding=[_popup_pad_x(), _popup_pad_y(),
                                  _popup_pad_x(), _popup_pad_y()])
 
-        box.add_widget(self._auto_label("Edge 音色", font_size="13sp",
+        box.add_widget(self._auto_label("音色（点「试听」先听效果再决定）",
+                                        font_size="13sp",
                                         min_height=dp(22)))
+        voice_row = BoxLayout(size_hint_y=None, spacing=dp(6))
         spinner = Spinner(text=cur_label, values=labels or [cur_label],
-                          size_hint_y=None, height=dp(44))
+                          size_hint_x=1, height=dp(44))
         spinner.bind(text=lambda _s, lbl: state.update(
             voice=mapping.get(lbl, state["voice"])))
-        box.add_widget(self._safe_text(spinner, min_height=dp(44)))
+        voice_row.add_widget(spinner)
+        btn_preview = ABButton(text="▶ 试听", size_hint_x=None, width=dp(84),
+                               font_size="12sp")
+        btn_preview.bind(on_release=lambda *_: self._preview_voice(
+            state["voice"]))
+        voice_row.add_widget(btn_preview)
+        box.add_widget(self._safe_text(voice_row, min_height=dp(44)))
 
         box.add_widget(self._slider_row(
             "音调(Hz)", -50, 50, state["pitch"],
@@ -2100,6 +2192,8 @@ class AudioBookApp(App, WakelockFgMixin):
         btn_ok.bind(on_release=_ok)
         btns.add_widget(btn_ok)
         box.add_widget(btns)
+        # 弹窗关闭（保存/取消）时停掉可能还在播的试听
+        popup.bind(on_dismiss=lambda *_: self._stop_preview_player())
         popup.content = box
         popup.open()
 
@@ -3624,6 +3718,11 @@ class AudioBookApp(App, WakelockFgMixin):
         try:
             if self._engine is not None:
                 self._engine.shutdown()
+        except Exception:
+            pass
+        # 试听播放器还开着的话一并释放
+        try:
+            self._stop_preview_player()
         except Exception:
             pass
         # 关掉兜底时钟线程、释放 wakelock，避免退出后还在空转耗电

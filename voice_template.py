@@ -67,16 +67,18 @@ DEFAULT_SLOTS = {
     "少女4":     {"voice": "zh-CN-XiaoyuNeural",   "pitch": 12, "rate": 0.95},
     # ---- 离线（sherpa-onnx + Kokoro-82M，中英双语；下载语音包后可用） ----
     # ⚠️ kokoro:0..2 是英文音色（af_maple/af_sol/bf_vale），读中文小说
-    # 效果差，所以出厂「离线1..8」全部指向中文说话人（zf_001..zf_006 女、
-    # zm_009/zm_010 男）；旧映射里绑了离线1..8 的角色自动跟着换到中文音色。
+    # 效果差，所以出厂「离线1..8」全部指向中文说话人。zf_001 与 zm_010
+    # 是官方发布里仅有的两个带试听样例（HEARME_*.wav）的中文音色——
+    # 质量最稳，各类门槽位让它们打头；旧映射里绑了离线1..8 的角色
+    # 自动跟着换（设置里「全部恢复默认」可取到新出厂值）。
     "离线1":     {"voice": "kokoro:3",  "pitch": 0,  "rate": 1.0},
     "离线2":     {"voice": "kokoro:4",  "pitch": 0,  "rate": 1.0},
     "离线3":     {"voice": "kokoro:5",  "pitch": 0,  "rate": 1.0},
     "离线4":     {"voice": "kokoro:6",  "pitch": 0,  "rate": 1.0},
     "离线5":     {"voice": "kokoro:7",  "pitch": 0,  "rate": 1.0},
     "离线6":     {"voice": "kokoro:8",  "pitch": 0,  "rate": 1.0},
-    "离线7":     {"voice": "kokoro:58", "pitch": 0,  "rate": 1.0},
-    "离线8":     {"voice": "kokoro:59", "pitch": 0,  "rate": 1.0},
+    "离线7":     {"voice": "kokoro:59", "pitch": 0,  "rate": 1.0},
+    "离线8":     {"voice": "kokoro:58", "pitch": 0,  "rate": 1.0},
     # ---- 离线分类槽位（对应 Kokoro 音色库的门类，供角色换绑选用） ----
     "离线女1":   {"voice": "kokoro:3",  "pitch": 0,  "rate": 1.0},
     "离线女2":   {"voice": "kokoro:4",  "pitch": 0,  "rate": 1.0},
@@ -84,8 +86,9 @@ DEFAULT_SLOTS = {
     "离线女4":   {"voice": "kokoro:6",  "pitch": 0,  "rate": 1.0},
     "离线女5":   {"voice": "kokoro:7",  "pitch": 0,  "rate": 1.0},
     "离线女6":   {"voice": "kokoro:8",  "pitch": 0,  "rate": 1.0},
-    "离线男1":   {"voice": "kokoro:58", "pitch": 0,  "rate": 1.0},
-    "离线男2":   {"voice": "kokoro:59", "pitch": 0,  "rate": 1.0},
+    # zm_010 是官方试听样例，男声第一位；zm_009 次之
+    "离线男1":   {"voice": "kokoro:59", "pitch": 0,  "rate": 1.0},
+    "离线男2":   {"voice": "kokoro:58", "pitch": 0,  "rate": 1.0},
     "离线男3":   {"voice": "kokoro:60", "pitch": 0,  "rate": 1.0},
     "离线男4":   {"voice": "kokoro:61", "pitch": 0,  "rate": 1.0},
     "离线男5":   {"voice": "kokoro:62", "pitch": 0,  "rate": 1.0},
