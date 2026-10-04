@@ -69,6 +69,9 @@ jobs:
           echo "NDK: $NDK_DIR"
           rm -rf /tmp/llama
           git clone --depth 1 --branch $LLAMA_TAG https://github.com/ggml-org/llama.cpp /tmp/llama
+          # ⚠️ v0.5.0 里 tools/cli 只在 LLAMA_BUILD_SERVER=ON 时才进构建
+          #    （tools/CMakeLists.txt：if (LLAMA_BUILD_SERVER) add_subdirectory(cli)），
+          #    关掉 server 会连带 cli 一起消失 → "No rule to make target llama-cli"
           cmake -S /tmp/llama -B /tmp/llama/build-android \
             -DCMAKE_TOOLCHAIN_FILE=$NDK_DIR/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
@@ -77,7 +80,7 @@ jobs:
             -DGGML_OPENMP=OFF \
             -DLLAMA_CURL=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_TOOLS=ON
           cmake --build /tmp/llama/build-android --target llama-cli -j4
