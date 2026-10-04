@@ -3111,6 +3111,15 @@ class AudioBookApp(App, WakelockFgMixin):
             _bat_s = ("已允许" if _bat else "未允许") if _bat is not None else "未知"
         except Exception:
             _bat_s = "未知"
+        try:
+            _sp_log = os.path.join(self.user_data_dir, "sherpa", "load.log")
+            _sp_tail = "(无)"
+            if os.path.isfile(_sp_log):
+                with open(_sp_log, encoding="utf-8") as f:
+                    _ls = [l for l in f.read().splitlines() if l.strip()]
+                _sp_tail = _ls[-1][:60] if _ls else "(空)"
+        except Exception:
+            _sp_tail = "(读取失败)"
         _diag_text = (
             "版本 %s\n"
             "推进 %s   tick=%d\n"
@@ -3124,6 +3133,7 @@ class AudioBookApp(App, WakelockFgMixin):
             "正文 %s\n"
             "记忆 书=%s  断点=%s\n"
             "崩溃 %s\n"
+            "离线加载 %s\n"
             "最近错误 %s"
             % (BUILD_TAG, self._tick_mode, self._tick_count,
                _utter_ok,
@@ -3143,6 +3153,7 @@ class AudioBookApp(App, WakelockFgMixin):
                _layout,
                _book, _pos_s,
                (_crash_last or "无"),
+               _sp_tail,
                (str(self._last_error)[:120] or "无"))
         )
         _diag = ABDimLabel(text=_diag_text, size_hint_y=None, height=dp(92),
