@@ -19,6 +19,16 @@ import threading
 
 from voice_template import voice_friendly
 
+# 识别类别 → 优先使用的离线模板门类（prefer_offline=True 时生效）。
+# 离线门类用尽自动回落到同名的 Edge 门类；童声离线无对应，直接走 Edge。
+OFFLINE_CATEGORY_PREF = {
+    "男角色": "离线男",
+    "女角色": "离线女",
+    "中年叔叔": "离线叔叔",
+    "奶奶": "离线奶奶",
+    "少女": "离线少女",
+}
+
 
 class RoleMap:
     """一本书的角色映射表。
@@ -195,18 +205,29 @@ def delete_all_maps(data_dir: str, keep_book_key: str = None):
         print("[角色映射] 清空失败：%s" % err)
 
 
-def auto_map(book_key: str, detected, template):
+def auto_map(book_key: str, detected, template, prefer_offline=False):
     """按出场顺序把识别出的人物自动绑定到模板编号。
 
     detected 是 role_parser.analyze() 的第一项返回值：
-    [(人名, 类别), ...]，类别 ∈ 男角色/女角色/中年叔叔/奶奶。
+    [(人名, 类别), ...]，类别 ∈ 男角色/女角色/中年叔叔/奶奶/童声/少女。
     规则：本书第一个出场男角色 → 男角色1，第二个 → 男角色2 ……以此类推；
     同类编号用尽后该人物保持未绑定（朗读时回退全局单音色）。
+
+    prefer_offline=True 且离线语音包可用时，优先从**离线门类**取编号
+    （男角色→离线男N、女角色→离线女N、中年叔叔→离线叔叔N、
+    奶奶→离线奶奶N、少女→离线少女N），该门类用尽再回落到 Edge 门类。
+    Kokoro 没有童声音色，童声始终走 Edge 槽位。
     """
     rm = RoleMap(book_key)
     used = set()
     for name, category in (detected or []):
-        slot = template.next_free_slot(category, used) if template else None
+        slot = None
+        if prefer_offline and template:
+            off = OFFLINE_CATEGORY_PREF.get(category)
+            if off:
+                slot = template.next_free_slot(off, used)
+        if not slot and template:
+            slot = template.next_free_slot(category, used)
         if slot:
             used.add(slot)
         entry = rm.ensure(name)

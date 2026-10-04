@@ -96,6 +96,10 @@ class SherpaTTS:
         self._sample_rate = 24000
         self._num_speakers = 0
         self._load_lock = threading.Lock()
+        # 原生合成互斥锁：预取会并发开多个线程调同一个引擎句柄的
+        # Generate，sherpa-onnx 不承诺该调用线程安全（内部共享分词/
+        # jieba 状态），并发调用是随机原生崩溃的来源 → 全部串行化
+        self._synth_lock = threading.Lock()
         self._failed = False        # 加载失败后不再反复尝试
         self._failed_msg = ""       # 可读的失败原因（透传给合成错误提示）
 
@@ -697,14 +701,18 @@ class SherpaTTS:
         """合成一句话并写成 wav（MediaPlayer 可直接播放）。
 
         sid 为 Kokoro 说话人编号（int）。抛异常由调用方降级处理。
+        全程持 _synth_lock：预取线程与当前句合成线程共用一个原生
+        引擎句柄，必须串行（见 __init__ 的说明）。
         """
-        tts = self._ensure_loaded()
-        if tts is None:
-            raise RuntimeError(self._failed_msg or "离线引擎未就绪")
-        if os.environ.get("ANDROID_ARGUMENT") or os.environ.get("ANDROID_ROOT"):
-            self._synth_android(text, sid, path, speed)
-        else:
-            self._synth_desktop(text, sid, path, speed)
+        with self._synth_lock:
+            tts = self._ensure_loaded()
+            if tts is None:
+                raise RuntimeError(self._failed_msg or "离线引擎未就绪")
+            if os.environ.get("ANDROID_ARGUMENT") or \
+                    os.environ.get("ANDROID_ROOT"):
+                self._synth_android(text, sid, path, speed)
+            else:
+                self._synth_desktop(text, sid, path, speed)
 
     def _write_wav(self, samples, path):
         import array
@@ -733,8 +741,13 @@ class SherpaTTS:
         lib.SherpaOnnxOfflineTtsGenerate.restype = ctypes.c_void_p
         lib.SherpaOnnxOfflineTtsGenerate.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32, ctypes.c_float]
+        # ⚠️ 销毁函数收的是指针句柄（Generate 的 c_void_p 返回值是 int）。
+        # 之前 argtypes 写成了 POINTER(SherpaOnnxGeneratedAudio)，ctypes 在
+        # 调用前直接抛 TypeError —— 而这行发生在「样本已读出、wav 未写」
+        # 的节点，等于**每次合成都在最后一步失败**，全部回退在线音色。
+        lib.SherpaOnnxDestroyOfflineTtsGeneratedAudio.restype = None
         lib.SherpaOnnxDestroyOfflineTtsGeneratedAudio.argtypes = [
-            ctypes.POINTER(SherpaOnnxGeneratedAudio)]
+            ctypes.c_void_p]
         audio = lib.SherpaOnnxOfflineTtsGenerate(
             self._tts, text.encode("utf-8"), int(sid), float(speed))
         if not audio:

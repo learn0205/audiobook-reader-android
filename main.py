@@ -1717,8 +1717,9 @@ class AudioBookApp(App, WakelockFgMixin):
         rm = None if force_new else role_config.load_map(
             self.user_data_dir, self._book_key)
         if rm is None:
-            rm = role_config.auto_map(self._book_key, characters,
-                                      self._voice_template)
+            rm = role_config.auto_map(
+                self._book_key, characters, self._voice_template,
+                prefer_offline=self._role_prefer_offline())
             role_config.save_map(self.user_data_dir, rm)
         self._role_map = rm
         if self._multi_role_enabled():
@@ -1745,6 +1746,36 @@ class AudioBookApp(App, WakelockFgMixin):
 
     def _multi_role_btn_text(self):
         return "已开启" if self._multi_role_enabled() else "已关闭"
+
+    def _role_prefer_offline(self):
+        """角色自动映射是否优先用离线音色（离线语音包就绪才生效）。"""
+        if not bool(self._config.get("role_voice_offline", True)):
+            return False
+        try:
+            import sherpa_tts as _sh
+            inst = _sh.get_instance(self.user_data_dir)
+            return inst.model_ready() and not inst.disabled()
+        except Exception:
+            return False
+
+    def _role_offline_btn_text(self):
+        return ("离线优先" if bool(self._config.get("role_voice_offline", True))
+                else "在线优先")
+
+    def _toggle_role_offline(self, btn=None):
+        """切换角色自动配音的音源优先级；重新识别本书角色以重新分配编号。"""
+        cur = bool(self._config.get("role_voice_offline", True))
+        self._config.set("role_voice_offline", not cur)
+        self._config.save()
+        if btn is not None:
+            btn.text = self._role_offline_btn_text()
+        if self._paragraphs:
+            self._toast("已切换为%s，正在重新识别角色…"
+                        % ("离线优先" if not cur else "在线优先"))
+            self._scan_roles_async(force_new=True)
+        else:
+            self._toast("已切换为%s（打开书籍后识别角色时生效）"
+                        % ("离线优先" if not cur else "在线优先"))
 
     def _toggle_multi_role(self, btn=None):
         enabled = not self._multi_role_enabled()
@@ -3240,6 +3271,18 @@ class AudioBookApp(App, WakelockFgMixin):
         self._clip_text(btn_multi)
         multi_row.add_widget(btn_multi)
         box.add_widget(self._auto_row(multi_row, dp(46)))
+
+        # ---- 角色自动配音音源：离线(Kokoro)优先 / 在线(Edge)优先 ----
+        src_row = BoxLayout(size_hint_y=None, spacing=dp(8))
+        src_row.add_widget(self._auto_label("角色自动配音音源",
+                                            font_size="13sp",
+                                            min_height=dp(24)))
+        btn_src = ABButton(text=self._role_offline_btn_text(),
+                           size_hint_x=None, width=dp(96))
+        btn_src.bind(on_release=lambda *_: self._toggle_role_offline(btn_src))
+        self._clip_text(btn_src)
+        src_row.add_widget(btn_src)
+        box.add_widget(self._auto_row(src_row, dp(46)))
 
         btn_roles = ABButton(text="角色管理（本书 · 人名绑定音色编号）",
                              size_hint_y=None, height=dp(44))
