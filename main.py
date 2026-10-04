@@ -3258,6 +3258,19 @@ class AudioBookApp(App, WakelockFgMixin):
                                             min_height=dp(24)))
             box.add_widget(self._auto_label(_line, font_size="12sp",
                                             min_height=dp(22)))
+            if _inst.disabled():
+                box.add_widget(self._auto_label(
+                    "离线引擎上次加载时崩溃，已临时禁用（在线音色不受影响）",
+                    font_size="12sp", min_height=dp(22)))
+                btn_re = ABButton(text="重新启用离线引擎（再次尝试加载）",
+                                  size_hint_y=None, height=dp(44))
+
+                def _re_enable(*_):
+                    _inst.re_enable()
+                    self._toast("已重新启用，下次播放离线音色时再次尝试加载")
+                    popup.dismiss()
+                btn_re.bind(on_release=_re_enable)
+                box.add_widget(self._safe_text(btn_re, min_height=dp(44)))
             if not _inst.model_ready() and _st["status"] != "downloading":
                 btn_dl = ABButton(text="下载离线语音包（下载后完全离线可用）",
                                   size_hint_y=None, height=dp(44))

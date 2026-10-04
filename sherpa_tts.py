@@ -97,6 +97,7 @@ class SherpaTTS:
         self._num_speakers = 0
         self._load_lock = threading.Lock()
         self._failed = False        # 加载失败后不再反复尝试
+        self._failed_msg = ""       # 可读的失败原因（透传给合成错误提示）
 
     # ---------------- 状态 ----------------
     def model_ready(self):
@@ -360,8 +361,10 @@ class SherpaTTS:
                 return self._tts
             if not self.model_ready():
                 self._failed = True
+                self._failed_msg = "离线语音包未下载或未导入"
                 return None
             try:
+                self._precheck_model()   # 不完整 → 可读错误（双平台共用）
                 if os.environ.get("ANDROID_ARGUMENT") or \
                         os.environ.get("ANDROID_ROOT"):
                     self._load_android()
@@ -371,7 +374,34 @@ class SherpaTTS:
                 print("[sherpa] 离线引擎加载失败：%s" % err)
                 self._failed = True
                 self._tts = None
+                self._failed_msg = str(err)
             return self._tts
+
+    def _precheck_model(self):
+        """完整性预检：导入时存储中断可能留下截断的文件，损坏的
+        model/voices 会让原生初始化直接崩溃（且无法捕获）——先拦下，
+        给出可读错误而不是闪退。桌面基准：model≈310MB、voices≈51MB、
+        espeak≈355 个文件。"""
+        mb = os.path.getsize(self._data_sub("model.onnx")) / 1048576.0
+        vk = os.path.getsize(self._data_sub("voices.bin")) / 1024.0
+        e_dir = self._data_sub("espeak-ng-data")
+        e_cnt = sum(len(fs) for _, _, fs in os.walk(e_dir)) if e_dir else 0
+        _crumb(self.data_dir,
+               "文件: model=%.1fMB voices=%.0fKB espeak=%d"
+               % (mb, vk, e_cnt))
+        if mb < 250:
+            _crumb(self.data_dir, "model.onnx 不完整")
+            raise RuntimeError(
+                "model.onnx 只有 %.0fMB（应约310MB），语音包不完整——"
+                "请重新导入语音包" % mb)
+        if vk < 30:
+            _crumb(self.data_dir, "voices.bin 不完整")
+            raise RuntimeError("voices.bin 不完整，请重新导入语音包")
+        if e_cnt < 300:
+            _crumb(self.data_dir, "espeak-ng-data 不完整(%d)" % e_cnt)
+            raise RuntimeError(
+                "espeak-ng-data 只解出 %d 个文件（应355个），语音包不完整"
+                "——请重新导入语音包" % e_cnt)
 
     def _data_sub(self, *names):
         """在模型目录及其一级子目录里找文件/目录（兼容压缩包内层级差异）。"""
@@ -500,7 +530,7 @@ class SherpaTTS:
         model_cfg.vits = vits_cfg
         model_cfg.matcha = matcha_cfg
         model_cfg.kokoro = kokoro_cfg
-        model_cfg.num_threads = 2
+        model_cfg.num_threads = 1
         model_cfg.debug = 0
         model_cfg.provider = b"cpu"
         cfg = SherpaOnnxOfflineTtsConfig()
@@ -508,12 +538,27 @@ class SherpaTTS:
         cfg.rule_fsts = self._rule_fsts().encode()
         cfg.max_num_sentences = 1
         cfg.silence_scale = 1.0
+        # 完整性预检已在 _ensure_loaded 里做过（双平台共用）
+        # 崩溃熔断：上次 create 原生崩溃（pending 标记还在）→ 本次禁用离线，
+        # 避免「选离线音色→崩溃→再选→再崩溃」的死循环
+        pending = os.path.join(self.data_dir, "sherpa", "pending_load")
+        if os.path.isfile(pending):
+            _crumb(self.data_dir, "检测到上次加载原生崩溃 → 本次跳过并禁用")
+            open(os.path.join(self.data_dir, "sherpa", "disabled"), "w").close()
+            self._failed = True
+            raise RuntimeError(
+                "离线引擎上次加载时崩溃，已临时禁用（可在设置里重新启用）")
+        open(pending, "w").close()
         _crumb(self.data_dir, "SherpaOnnxCreateOfflineTts 开始（若此后无日志即为原生崩溃）")
         handle = lib.SherpaOnnxCreateOfflineTts(ctypes.byref(cfg))
         if not handle:
             _crumb(self.data_dir, "create 返回空")
             raise RuntimeError("sherpa-onnx 初始化失败")
         _crumb(self.data_dir, "create ok")
+        try:
+            os.remove(os.path.join(self.data_dir, "sherpa", "pending_load"))
+        except OSError:
+            pass
         self._lib = lib
         self._tts = handle
         self._sample_rate = lib.SherpaOnnxOfflineTtsSampleRate(handle)
@@ -531,6 +576,16 @@ class SherpaTTS:
     # App 必卡死闪退。模型只在合成线程里真正懒加载。
     EXPECTED_SPEAKERS = 103
 
+    def disabled(self):
+        return os.path.isfile(os.path.join(self.data_dir, "sherpa", "disabled"))
+
+    def re_enable(self):
+        try:
+            os.remove(os.path.join(self.data_dir, "sherpa", "disabled"))
+        except OSError:
+            pass
+        self._failed = False
+
     def num_speakers(self):
         if self.is_loaded():
             return self._num_speakers
@@ -543,7 +598,7 @@ class SherpaTTS:
         """
         tts = self._ensure_loaded()
         if tts is None:
-            raise RuntimeError("离线引擎未就绪")
+            raise RuntimeError(self._failed_msg or "离线引擎未就绪")
         if os.environ.get("ANDROID_ARGUMENT") or os.environ.get("ANDROID_ROOT"):
             self._synth_android(text, sid, path, speed)
         else:
@@ -596,6 +651,8 @@ class SherpaTTS:
 
     def list_speakers(self):
         """供音色列表展示：离线1..N（N 为模型说话人数）。"""
+        if self.disabled():
+            return []
         n = self.num_speakers()
         return [("kokoro:%d" % i, "离线%d号（Kokoro·离线）" % (i + 1))
                 for i in range(n)]
