@@ -203,6 +203,24 @@ class EdgeTTS:
         sherpa_tts.get_instance(data_dir).synth_to_file(
             sentence, sid, path, speed=speed)
 
+    # kokoro 合成失败时的 Edge 回退音色池：男/女交替、声线差异明显，
+    # 按 sid 取模确定性分配——同一角色每次回退都是同一把声音
+    _KOKORO_FB_VOICES = (
+        "zh-CN-YunxiNeural", "zh-CN-XiaoxiaoNeural",
+        "zh-CN-YunyangNeural", "zh-CN-XiaoyiNeural",
+        "zh-CN-YunjianNeural", "zh-CN-XiaoyanNeural",
+        "zh-CN-YunxiaNeural", "zh-CN-XiaoyouNeural",
+    )
+
+    @classmethod
+    def _kokoro_fallback_voice_for(cls, voice):
+        """kokoro:<sid> → 该说话人专属的 Edge 回退音色（保持角色区分度）。"""
+        try:
+            n = int(str(voice).split(":", 1)[1])
+        except (TypeError, ValueError, IndexError):
+            n = 0
+        return cls._KOKORO_FB_VOICES[max(0, n) % len(cls._KOKORO_FB_VOICES)]
+
     # ==================== 生命周期 ====================
     def start(self):
         """无需离线初始化；缓存目录在首次合成时按 user_data_dir 创建。"""
@@ -638,13 +656,15 @@ class EdgeTTS:
                     try:
                         self._kokoro_synth(sentence, voice, path, rate)
                     except Exception as kerr:
-                        # 离线引擎失败 → 这一句降级为 Edge 全局音色继续读
-                        # （绝不跳句：否则整本书会被静默跳完）
-                        self._kokoro_fallback_voice = getattr(
-                            self, "_kokoro_fallback_voice",
-                            "zh-CN-XiaoxiaoNeural")
-                        fbv = self._kokoro_fallback_voice
-                        fbr, fbp, fbv2 = self._synth_params()
+                        # 离线引擎失败 → 这一句降级为 Edge 继续读
+                        # （绝不跳句：否则整本书会被静默跳完）。
+                        # ⚠️ 回退音色必须**按说话人编号区分**：若所有
+                        # kokoro 句子都退到同一个全局音色，多角色就完全
+                        # 失去区分度——全书听起来是同一个人在读。
+                        # 这里按 sid 确定性映射到不同 Edge 音色，并保留
+                        # 该角色自己的语速。
+                        fbv = self._kokoro_fallback_voice_for(voice)
+                        fbr, fbp, fbv2 = rate, "+0Hz", "+0%"
                         path = self._cache_path(
                             chr(1) + sentence,
                             params=(fbv, fbr, fbp, fbv2))

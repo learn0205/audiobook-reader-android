@@ -1762,6 +1762,26 @@ class AudioBookApp(App, WakelockFgMixin):
         return ("离线优先" if bool(self._config.get("role_voice_offline", True))
                 else "在线优先")
 
+    def _warn_multi_role_backend(self, voice_name, force=False):
+        """选了系统音色时提示：多角色只在 Edge 在线 / Kokoro 离线音色下生效。
+
+        系统引擎不支持逐句换音色——全局选系统音色时，即使多角色开着、
+        角色也绑了编号，整本书仍是同一个声音（这是引擎能力边界，不是 bug）。
+        """
+        if not (self._multi_role_enabled() and self._role_map is not None):
+            return
+        is_kokoro = isinstance(voice_name, str) and \
+            voice_name.startswith("kokoro:")
+        # 系统音色：不在已合并音色列表的 edge 分组里、也不是 kokoro
+        src = None
+        try:
+            src = self._engine._voice_source_of(voice_name)
+        except Exception:
+            pass
+        if force or (not is_kokoro and src == "android"):
+            self._toast("提示：多角色朗读需选择 Edge 在线或 Kokoro 离线音色"
+                        "（当前是系统音色，整本书会是同一个声音）")
+
     def _toggle_role_offline(self, btn=None):
         """切换角色自动配音的音源优先级；重新识别本书角色以重新分配编号。"""
         cur = bool(self._config.get("role_voice_offline", True))
@@ -1789,6 +1809,9 @@ class AudioBookApp(App, WakelockFgMixin):
         """开关变化后重挂/摘掉逐句音色钩子（下一句立刻生效）。"""
         if self._multi_role_enabled() and self._role_map is not None:
             self._engine.set_voice_resolver(self._role_voice_resolver)
+            cur = str(self._config.get("voice_name", ""))
+            if cur:
+                self._warn_multi_role_backend(cur)
         else:
             self._engine.set_voice_resolver(None)
 
@@ -3221,6 +3244,7 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._engine.set_voice(name)
                 self._config.set("voice_name", name)
                 self._config.save()
+                self._warn_multi_role_backend(name)
         spinner.bind(text=_pick_voice)
         # 音色名可能很长：同样按「留边距 + 自动长高」排，别让它顶出弹窗
         box.add_widget(self._safe_text(spinner, min_height=dp(44)))
