@@ -59,7 +59,8 @@ import ai_roles
 from voice_template import VOICE_FRIENDLY, VoiceTemplate, voice_friendly
 # ⚠️ STATE_STOPPED 也必须导入：_on_state 里用它决定「是否关闭前台服务」。
 #    漏了它会抛 NameError，而异常从按钮回调冒出 → Kivy 重新抛出 → **一点暂停就闪退**。
-from tts_android import STATE_PAUSED, STATE_PLAYING, STATE_STOPPED
+from tts_android import (STATE_PAUSED, STATE_PLAYING, STATE_STOPPED,
+                         split_sentences)
 from tts_engine import ReaderTTS
 
 # ---- 构建标识（CI 打包时由 .github/workflows/build-apk.yml 写入）----
@@ -131,6 +132,7 @@ REQUEST_PICK_BOOK = 1001
 REQUEST_EXPORT_CFG = 1002   # 导出书签/进度备份（ACTION_CREATE_DOCUMENT）
 REQUEST_EXPORT_LOG = 1003   # 导出诊断日志（ACTION_CREATE_DOCUMENT）
 REQUEST_PICK_AI_MODEL = 1004  # 选择 AI 模型文件（.gguf）导入
+REQUEST_PICK_VITS_MODEL = 1005  # 选择 VITS 语音包（.tar.bz2）导入
 
 KV = """
 # ============================================================
@@ -490,6 +492,9 @@ class AudioBookApp(App, WakelockFgMixin):
         self._role_scan_force_new = False  # 重新识别时忽略已有映射文件
         self._role_scan_pending = None     # 后台线程扫完暂存，由 _tick 主线程取用
         self._ai_running = False          # AI 分析进行中（防重复触发）
+        self._ai_annot = {}               # Qwen 逐句标注 {(段,句): (说话人,情感)}
+        self._ai_annot_cache = {}         # 窗口级缓存（进程内）
+        self._ai_annot_toast_shown = False
 
         # ---- 朗读推进兜底时钟（独立于 Kivy 逐帧时钟，熄屏也能跑） ----
         self._tick_running = False
@@ -876,7 +881,8 @@ class AudioBookApp(App, WakelockFgMixin):
     def _on_activity_result(self, request_code, result_code, intent):
         """SAF 选择器返回：书本 → 复制后打开；.json → 备份导入；导出码 → 落盘。"""
         if request_code not in (REQUEST_PICK_BOOK, REQUEST_EXPORT_CFG,
-                                REQUEST_EXPORT_LOG, REQUEST_PICK_AI_MODEL):
+                                REQUEST_EXPORT_LOG, REQUEST_PICK_AI_MODEL,
+                                REQUEST_PICK_VITS_MODEL):
             return
         try:
             from android import activity
@@ -910,6 +916,10 @@ class AudioBookApp(App, WakelockFgMixin):
             if request_code == REQUEST_PICK_AI_MODEL:
                 # AI 模型导入：复制到私有目录（约1.1GB，后台线程 + 进度提示）
                 self._import_ai_model(uri)
+                return
+            if request_code == REQUEST_PICK_VITS_MODEL:
+                # VITS 语音包导入：SAF 给的是单文件流，复制成 tar.bz2 再解压
+                self._import_vits_model(uri)
                 return
             if name.lower().endswith(".json"):
                 data = self._read_uri_text(uri)
@@ -998,6 +1008,158 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._post_to_main(lambda: self._on_error(
                     "AI 模型下载失败：%s" % msg))
         threading.Thread(target=_work, daemon=True).start()
+
+    def _pick_vits_model_file(self):
+        """系统文件选择器：挑 VITS 语音包 .tar.bz2（电脑下载后传手机）。"""
+        if not self._android():
+            self._toast("桌面环境请把语音包解压到应用数据目录 vits/ 下")
+            return
+        try:
+            from android import activity
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("*/*")
+            activity.bind(on_activity_result=self._on_activity_result)
+            PythonActivity.mActivity.startActivityForResult(
+                intent, REQUEST_PICK_VITS_MODEL)
+        except Exception as err:
+            self._toast(f"打开文件选择器失败：{err}")
+
+    def _import_vits_model(self, uri):
+        """复制所选语音包到私有目录并解压校验（后台线程）。"""
+        self._toast("正在导入 VITS 语音包（约290MB，请勿关闭应用）…")
+
+        def _work():
+            try:
+                import vits_tts as _vt
+                part = os.path.join(self.user_data_dir, "vits_pack.tar.bz2")
+                try:
+                    if os.path.isfile(part):
+                        os.remove(part)
+                except OSError:
+                    pass
+                self._copy_uri_to_file(uri, part)
+                try:
+                    _vt.import_model(part, self.user_data_dir)
+                    self._post_to_main(lambda: self._toast(
+                        "VITS 语音包导入成功，本地合成已可用"))
+
+                    def _refresh():
+                        try:
+                            self._engine.refresh_local_voices()
+                        except Exception:
+                            pass
+                    self._post_to_main(_refresh)
+                finally:
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+            except Exception as err:
+                msg = str(err)
+                self._post_to_main(lambda: self._on_error(
+                    "VITS 语音包导入失败：%s" % msg))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _download_vits_model(self):
+        """App 内下载 VITS 语音包（hf-mirror 逐文件断点续传）。"""
+        self._toast("开始下载 VITS 语音包（%s）…" % "fanchen-C")
+        self._v_dl_last = 0
+
+        def _prog(p):
+            now = time.time()
+            if now - getattr(self, "_v_dl_last", 0) > 15 or p >= 1.0:
+                self._v_dl_last = now
+                pct = int(p * 100)
+                self._post_to_main(lambda: self._toast(
+                    "VITS 语音包下载中 %d%%…" % pct))
+
+        def _work():
+            try:
+                import vits_tts as _vt
+                _vt.download_model(self.user_data_dir, progress_cb=_prog)
+                self._post_to_main(lambda: self._toast(
+                    "VITS 语音包下载完成，本地合成已可用"))
+
+                def _refresh():
+                    try:
+                        self._engine.refresh_local_voices()
+                    except Exception:
+                        pass
+                self._post_to_main(_refresh)
+            except Exception as err:
+                msg = str(err)
+                self._post_to_main(lambda: self._on_error(
+                    "VITS 语音包下载失败：%s" % msg))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_voice_label_panel(self):
+        """音色试听与性别标注：187 个 VITS 音色过一遍，标好永久生效。"""
+        import vits_tts as _vt
+        _vt._current_data_dir[0] = self.user_data_dir
+        n = _vt.get_instance(self.user_data_dir).num_speakers()
+        labels = _vt.get_labels(self.user_data_dir)
+        state = {"sid": 0}
+
+        popup = Popup(title="音色试听与性别标注（%d 个音色，已标 %d 个）"
+                            % (n, len(labels)), size_hint=(0.92, 0.8))
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(10))
+        box.add_widget(self._auto_label(
+            "点试听听效果，标性别后角色自动映射才能分对男女；"
+            "标注存全局，一次即可。", font_size="12sp", min_height=dp(36)))
+        spin = Spinner(text="音色 1号",
+                       values=["音色 %d号" % (i + 1) for i in range(n)],
+                       size_hint_y=None, height=dp(44))
+        box.add_widget(self._safe_text(spin, min_height=dp(44)))
+        lbl_state = self._auto_label("当前标注：未标注", font_size="12sp",
+                                     min_height=dp(24))
+        box.add_widget(lbl_state)
+
+        def _refresh_state():
+            g = _vt.get_labels(self.user_data_dir).get(state["sid"])
+            lbl_state.text = "音色 %d号 · 当前标注：%s" % (
+                state["sid"] + 1, g or "未标注")
+        spin.bind(text=lambda _s, t: (
+            state.update(sid=int(t.replace("音色", "").replace("号", "")) - 1),
+            _refresh_state()))
+
+        row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        btn_listen = ABButton(text="▶ 试听", font_size="12sp")
+        btn_listen.bind(on_release=lambda *_: self._preview_voice(
+            "vits:%d" % state["sid"]))
+        btn_m = ABPrimaryButton(text="男", font_size="12sp")
+        btn_f = ABPrimaryButton(text="女", font_size="12sp")
+        btn_skip = ABButton(text="跳过", font_size="12sp")
+        row.add_widget(btn_listen)
+        row.add_widget(btn_m)
+        row.add_widget(btn_f)
+        row.add_widget(btn_skip)
+        box.add_widget(row)
+        box.add_widget(self._auto_label(
+            "标注建议：先听 20-40 个把男女分开即可，"
+            "其余保持未标注（不会被自动映射选中）。",
+            font_size="11sp", min_height=dp(30)))
+
+        def _mark(gender):
+            _vt.set_label(self.user_data_dir, state["sid"], gender)
+            _refresh_state()
+            popup.title = ("音色试听与性别标注（%d 个音色，已标 %d 个）"
+                           % (n, len(_vt.get_labels(self.user_data_dir))))
+        btn_m.bind(on_release=lambda *_: _mark("男"))
+        btn_f.bind(on_release=lambda *_: _mark("女"))
+        btn_skip.bind(on_release=lambda *_: _mark(None))
+
+        btn_close = ABPrimaryButton(text="关闭", font_size="12sp",
+                                    size_hint_y=None, height=dp(44))
+        btn_close.bind(on_release=lambda *_: (
+            popup.dismiss(), self._stop_preview_player()))
+        box.add_widget(btn_close)
+        popup.bind(on_dismiss=lambda *_: self._stop_preview_player())
+        popup.content = box
+        popup.open()
 
     def _collect_role_samples(self, max_chars=3, max_len=60):
         """把逐句说话人标注整理成 [(name, 原猜测类别, [对话片段...])]。"""
@@ -1202,18 +1364,29 @@ class AudioBookApp(App, WakelockFgMixin):
         popup.open()
 
     def _remove_history_item(self, key, popup):
-        """删除一条历史（连同该书的断点/书签）。当前书在列表里禁用删除。
+        """删除一条历史（连同该书的断点/书签/角色映射/音频缓存）。
 
-        删除小说时同步删除该书的人名映射配置（不弹确认框）；
+        当前书在列表里禁用删除。删除小说时同步删除：
+        · 该书的人名映射配置（role_maps/<md5>.json）
+        · 该书的本地合成音频缓存（tts_cache/<书哈希>/，约节省几十MB）
         全局音色清单模板与全局语速音调设置不受影响。
         """
         self._config.remove_book_data(key)
         self._config.save()
         role_config.delete_map(self.user_data_dir, key)
+        self._purge_book_audio_cache(key)
         if popup is not None:
             popup.dismiss()
         Clock.schedule_once(lambda _dt: self._open_history_popup(), 0)
-        self._toast("已从历史移除")
+        self._toast("已从历史移除（含角色配置与音频缓存）")
+
+    def _purge_book_audio_cache(self, book_key):
+        """删除某本书的本地合成音频缓存目录（tts_cache/<书哈希>/）。"""
+        import hashlib
+        tag = hashlib.md5(book_key.encode("utf-8", "replace")).hexdigest()
+        d = os.path.join(self.user_data_dir, "tts_cache", tag)
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
 
     def _clear_play_history(self, popup):
         """清空全部历史；当前书（若在阅读）保留断点/书签防丢进度，
@@ -1395,6 +1568,10 @@ class AudioBookApp(App, WakelockFgMixin):
         self._offsets, self._total_chars = offsets, total
         self._book_path = doc.path
         self._book_key = ConfigManager.book_key(doc.path)
+        # 本地合成音频缓存按书隔离（删书时整目录清理）
+        self._engine.set_book_tag(self._book_key)
+        self._ai_annot = {}          # {(段, 句): (说话人, 情感)}，换书即作废
+        self._ai_annot_pending = set()
 
         # ---- 多角色朗读：换书即作废上一本的角色上下文 ----
         # 先摘掉逐句音色钩子（找不到映射/识别完成前按全局单音色朗读），
@@ -1814,27 +1991,138 @@ class AudioBookApp(App, WakelockFgMixin):
             self._toast("已识别 %d 个角色，多角色配音就绪" % len(characters))
 
     def _role_voice_resolver(self, para_index, sentence):
-        """引擎逐句回调（Edge 合成子线程，绝不能碰 UI）。
+        """引擎逐句回调（本地合成子线程，绝不能碰 UI）。
 
         这句是谁在说 → 该人物的声音参数 (voice, rate倍率, pitch Hz)；
-        旁白 / 未绑定编号的人物返回 None → 引擎按全局音色读。
+        解析顺序：① 正则命中（role_speakers）② Qwen 逐句标注（代词/连续
+        对话）③ 返回 None → 引擎按全局音色读。
+        情感标签映射为语速微调（VITS 无原生情感维度，明示近似）。
         """
         try:
             if not self._multi_role_enabled() or self._role_map is None:
                 return None
             name = self._role_speakers.get((para_index, sentence))
+            emotion = "平静"
             if not name:
+                annot = getattr(self, "_ai_annot", {}).get(
+                    (para_index, sentence))
+                if not annot:
+                    return None
+                name, emotion = annot
+            if not name or name in ("旁白", "未知"):
                 return None
-            return role_config.RoleMap.entry_params(
+            params = role_config.RoleMap.entry_params(
                 self._role_map.get(name), self._voice_template)
+            if params and emotion in ai_roles.EMOTION_RATE:
+                v, mult, phz = params
+                mult = max(0.5, min(2.0, mult *
+                                    ai_roles.EMOTION_RATE[emotion]))
+                params = (v, mult, phz)
+            return params
         except Exception:
             return None
+
+    # ---------------- Qwen 逐句标注（正则判不出的代词/连续对话） ----------------
+    _ANNOT_WINDOW = 80          # 一次标注的段落数（块太大幻觉多、太慢）
+
+    def _ensure_ai_annotation(self, para_index):
+        """播放进入新段落时调用：本窗口句子若还没标注过就后台跑 Qwen。
+
+        绝不阻塞播放（后台线程）；失败只记诊断不弹窗刷屏（正则顶着）。
+        标注结果按（书+窗口）缓存到 ai_annot/*.json，二次进章零延迟。
+        """
+        if not self._multi_role_enabled() or not self._paragraphs:
+            return
+        ok, _reason = ai_roles.model_ready(self.user_data_dir)
+        if not ok:
+            return
+        start = max(0, int(para_index))
+        end = min(len(self._paragraphs), start + self._ANNOT_WINDOW)
+        win = (start, end)
+        if not hasattr(self, "_ai_annot_cache"):
+            self._ai_annot_cache = {}
+        if win in getattr(self, "_ai_annot_pending", set()):
+            return
+        # 磁盘缓存命中 → 直接加载
+        cpath = self._annot_cache_path(win)
+        if os.path.isfile(cpath):
+            try:
+                with open(cpath, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                by_key = {(int(k.split("|", 1)[0]),
+                           k.split("|", 1)[1]): tuple(v)
+                          for k, v in cached.items()}
+                self._ai_annot.update(by_key)
+                self._ai_annot_cache[win] = by_key
+                return
+            except Exception:
+                pass
+        # 收集窗口内句子（与引擎同一套分句逻辑，保证键对齐）；
+        # 送 Qwen 用自增整数 id（元组没法进提示词），结果按键映射还原
+        lines, keymap = [], {}
+        seq = 0
+        for pi in range(start, end):
+            for sent in split_sentences(self._paragraphs[pi]):
+                if sent.strip():
+                    lines.append((seq, sent[:80]))
+                    keymap[seq] = (pi, sent)
+                    seq += 1
+        if not lines:
+            return
+        if not hasattr(self, "_ai_annot_pending"):
+            self._ai_annot_pending = set()
+        self._ai_annot_pending.add(win)
+        known = list(self._role_map.names()) if self._role_map else []
+
+        def _work():
+            try:
+                result = ai_roles.annotate_sentences(
+                    self.user_data_dir, lines, known)
+                by_key = {}
+                for seq_id, (sp, em) in result.items():
+                    if seq_id in keymap and sp not in ("旁白", "未知"):
+                        by_key[keymap[seq_id]] = (sp, em)
+
+                def _apply():
+                    self._ai_annot.update(by_key)
+                    self._ai_annot_cache[win] = by_key
+                    # 落盘缓存（键 "段|句文本"）
+                    try:
+                        os.makedirs(os.path.dirname(cpath), exist_ok=True)
+                        with open(cpath, "w", encoding="utf-8") as f:
+                            json.dump({"%d|%s" % k: v
+                                       for k, v in by_key.items()},
+                                      f, ensure_ascii=False)
+                    except Exception:
+                        pass
+                    if not getattr(self, "_ai_annot_toast_shown", False) \
+                            and by_key:
+                        self._ai_annot_toast_shown = True
+                        self._toast("Qwen 标注完成：代词/连续对话已可识别"
+                                    "（后续章节播放时自动预标注）")
+                self._post_to_main(_apply)
+            except Exception as err:
+                msg = str(err)
+
+                def _err():
+                    self._on_error("Qwen 逐句标注失败（正则模式不受影响）：%s"
+                                   % msg[:80])
+                self._post_to_main(_err)
+            finally:
+                self._ai_annot_pending.discard(win)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _annot_cache_path(self, win):
+        import hashlib
+        h = hashlib.md5(("%s|%s" % (self._book_key, win)).encode(
+            "utf-8", "replace")).hexdigest()
+        return os.path.join(self.user_data_dir, "ai_annot", h + ".json")
 
     def _multi_role_btn_text(self):
         return "已开启" if self._multi_role_enabled() else "已关闭"
 
     def _warn_multi_role_backend(self, voice_name, force=False):
-        """选了系统音色时提示：多角色只在 Edge 在线音色下生效。
+        """选了系统音色时提示：多角色只在本地离线音色下生效。
 
         系统引擎不支持逐句换音色——全局选系统音色时，即使多角色开着、
         角色也绑了编号，整本书仍是同一个声音（这是引擎能力边界，不是 bug）。
@@ -1848,7 +2136,7 @@ class AudioBookApp(App, WakelockFgMixin):
         except Exception:
             pass
         if force or src == "android":
-            self._toast("提示：多角色朗读需选择 Edge 在线音色"
+            self._toast("提示：多角色朗读需选择 VITS 离线音色"
                         "（当前是系统音色，整本书会是同一个声音）")
 
     def _toggle_multi_role(self, btn=None):
@@ -2128,14 +2416,19 @@ class AudioBookApp(App, WakelockFgMixin):
 
         def _work():
             try:
-                import edge_tts_client
-                path = os.path.join(self.user_data_dir, "preview.mp3")
+                path = os.path.join(self.user_data_dir, "preview.wav")
                 if os.path.exists(path):
                     try:
                         os.remove(path)
                     except OSError:
                         pass
-                edge_tts_client.synthesize_to_file(
+                import vits_tts as _vt
+                _vt._current_data_dir[0] = self.user_data_dir
+                if not str(voice).startswith("vits:"):
+                    self._post_to_main(lambda: self._toast(
+                        "试听仅支持 VITS 离线音色"))
+                    return
+                _vt.synthesize_to_file(
                     self._PREVIEW_TEXT, voice, path,
                     rate="+0%", pitch="+0Hz", volume="+0%")
 
@@ -2149,7 +2442,7 @@ class AudioBookApp(App, WakelockFgMixin):
                     "试听生成失败：%s" % msg[:60]))
         threading.Thread(target=_work, daemon=True).start()
 
-    def _edge_voice_choices(self, current=""):
+    def _tts_voice_choices(self, current=""):
         """Edge 音色下拉选项：返回 (标签列表, 标签→ShortName 映射)。
 
         优先用运行时拉到的 Edge 音色列表；还没拉到（网络慢/失败）时
@@ -2158,7 +2451,7 @@ class AudioBookApp(App, WakelockFgMixin):
         names = []
         for v in getattr(self, "_voice_list", []):
             n = v.get("name")
-            if v.get("source") == "edge" and n and n not in names:
+            if v.get("source") == "local" and n and n not in names:
                 names.append(n)
         if not names:
             names = list(VOICE_FRIENDLY.keys())
@@ -2181,7 +2474,7 @@ class AudioBookApp(App, WakelockFgMixin):
         on_save(voice, pitch, rate) 保存回调；on_reset 提供时显示
         「恢复默认」按钮。
         """
-        labels, mapping = self._edge_voice_choices(cur_voice)
+        labels, mapping = self._tts_voice_choices(cur_voice)
         cur_label = next((l for l, n in mapping.items() if n == cur_voice),
                          labels[0] if labels else "无可用音色")
         state = {"voice": cur_voice, "pitch": int(cur_pitch),
@@ -2627,6 +2920,12 @@ class AudioBookApp(App, WakelockFgMixin):
         跨章必须重建控件（正文区只装当前章节）；同章内只挪高亮 ——
         绝不能每段都重建或全量刷新，那会卡死主线程、让朗读直接停住。
         """
+        # Qwen 逐句标注：进入新窗口时后台预标注（不阻塞播放）
+        try:
+            self._ensure_ai_annotation(index)
+        except Exception:
+            pass
+
         def _apply(_dt):
             if not self._paragraphs:
                 return
@@ -3366,7 +3665,7 @@ class AudioBookApp(App, WakelockFgMixin):
         box.add_widget(_diag)
 
         # ---- 音色 ----
-        box.add_widget(self._auto_label("音色（系统引擎 + Edge 在线）",
+        box.add_widget(self._auto_label("音色（系统引擎 + VITS 离线）",
                                         font_size="13sp", min_height=dp(24)))
         voice_labels = {v["label"]: v["name"] for v in getattr(self, "_voice_list", [])}
         current = str(self._config.get("voice_name", ""))
@@ -3443,21 +3742,19 @@ class AudioBookApp(App, WakelockFgMixin):
         box.add_widget(self._safe_text(btn_tpl, min_height=dp(44)))
 
         # ---- 离线 AI 角色分析（可选：导入/下载模型后才能用）----
-        box.add_widget(self._auto_label("离线 AI 角色分析（可选）", font_size="13sp",
+        box.add_widget(self._auto_label("离线 AI 角色分析（Qwen · 可选）",
+                                        font_size="13sp",
                                         min_height=dp(24)))
         try:
             _ai_ok, _ai_reason = ai_roles.model_ready(self.user_data_dir)
-            if _ai_ok:
-                _ai_line = "AI 模型：%s" % _ai_reason
-            else:
-                _ai_line = "AI 模型：%s" % _ai_reason
-            box.add_widget(self._auto_label(_ai_line, font_size="12sp",
+            box.add_widget(self._auto_label("Qwen 模型：%s" % _ai_reason,
+                                            font_size="12sp",
                                             min_height=dp(22)))
-            btn_ai_import = ABButton(text="导入 AI 模型（电脑下载 .gguf 后传手机）",
+            btn_ai_import = ABButton(text="导入 Qwen 模型（电脑下载 .gguf 后传手机）",
                                      size_hint_y=None, height=dp(44))
             btn_ai_import.bind(on_release=lambda *_: self._pick_ai_model_file())
             box.add_widget(self._safe_text(btn_ai_import, min_height=dp(44)))
-            btn_ai_dl = ABButton(text="在 App 内下载 AI 模型（%s，需网络）"
+            btn_ai_dl = ABButton(text="在 App 内下载 Qwen 模型（%s，需网络）"
                                       % ai_roles.MODEL_LABEL,
                                  size_hint_y=None, height=dp(44))
             btn_ai_dl.bind(on_release=lambda *_: self._download_ai_model())
@@ -3468,6 +3765,33 @@ class AudioBookApp(App, WakelockFgMixin):
                                      size_hint_y=None, height=dp(44))
         btn_ai_run.bind(on_release=lambda *_: self._ai_identify_roles())
         box.add_widget(self._safe_text(btn_ai_run, min_height=dp(44)))
+
+        # ---- 本地语音合成模型（VITS · 完全离线 · 替代在线TTS）----
+        box.add_widget(self._auto_label("离线语音合成（VITS · 必需）",
+                                        font_size="13sp",
+                                        min_height=dp(24)))
+        try:
+            import vits_tts as _vt
+            _vt._current_data_dir[0] = self.user_data_dir
+            _v_ok, _v_reason = _vt.model_ready(self.user_data_dir)
+            box.add_widget(self._auto_label("VITS 模型：%s" % _v_reason,
+                                            font_size="12sp",
+                                            min_height=dp(22)))
+            btn_v_import = ABButton(text="导入 VITS 语音包（fanchen-C .tar.bz2）",
+                                    size_hint_y=None, height=dp(44))
+            btn_v_import.bind(on_release=lambda *_: self._pick_vits_model_file())
+            box.add_widget(self._safe_text(btn_v_import, min_height=dp(44)))
+            btn_v_dl = ABButton(text="在 App 内下载 VITS 语音包（%s，需网络）"
+                                      % _vt.MODEL_TITLE,
+                                size_hint_y=None, height=dp(44))
+            btn_v_dl.bind(on_release=lambda *_: self._download_vits_model())
+            box.add_widget(self._safe_text(btn_v_dl, min_height=dp(44)))
+            btn_v_label = ABButton(text="音色试听与性别标注（一次性，改善多角色）",
+                                   size_hint_y=None, height=dp(44))
+            btn_v_label.bind(on_release=lambda *_: self._show_voice_label_panel())
+            box.add_widget(self._safe_text(btn_v_label, min_height=dp(44)))
+        except Exception:
+            pass
 
         # ---- 主题（深色 / 浅色，点击即时切换并记忆）----
         btn_theme = ABButton(

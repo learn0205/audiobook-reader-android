@@ -89,6 +89,20 @@ jobs:
           ls -la libs/arm64-v8a/
           test -f libs/arm64-v8a/libllama-runner.so
 
+      # 本地 TTS（sherpa-onnx v1.11.3 的 C API .so）：下载官方安卓预编译库
+      # 到 libs/，随 APK 打包；运行时 ctypes 调 VITS 分支合成（完全离线）。
+      - name: Download sherpa-onnx Android libs
+        run: |
+          mkdir -p libs/arm64-v8a
+          curl -fL --retry 5 -o /tmp/sherpa-android.tar.bz2             "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.11.3/sherpa-onnx-v1.11.3-android.tar.bz2"
+          rm -rf /tmp/sherpa-extract && mkdir -p /tmp/sherpa-extract
+          tar -xjf /tmp/sherpa-android.tar.bz2 -C /tmp/sherpa-extract
+          SRC_DIR=$(find /tmp/sherpa-extract -type d -name arm64-v8a | head -1)
+          echo "so dir: $SRC_DIR"
+          cp "$SRC_DIR"/*.so libs/arm64-v8a/
+          ls -la libs/arm64-v8a
+          test -f libs/arm64-v8a/libsherpa-onnx-c-api.so
+
       # 把本次构建的 commit 短哈希写进 build_info.py，随 APK 一起打包。
       # 这样 App 里能直接看到「装的是哪一版」，不用靠猜。
       - name: Write build info

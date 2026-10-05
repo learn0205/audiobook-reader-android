@@ -399,6 +399,134 @@ def merge_detected(characters, ai_result):
 
 
 # ---------------------------------------------------------------------------
+# 逐句标注（播放路径的 Qwen 协同：正则判不了的代词/连续对话交给它）
+# ---------------------------------------------------------------------------
+EMOTION_RATE = {"平静": 1.00, "温和": 1.00, "低沉": 0.95,
+                "激动": 1.06, "悲伤": 0.92}
+
+
+def build_annot_prompt(lines, known_roles):
+    """lines: [(句id, 句文本)]；known_roles: [人名]。→ 提示词。"""
+    role_hint = "、".join(known_roles[:40]) if known_roles else "（暂无）"
+    out = [
+        "你是小说朗读的台词标注器。下面按行给出小说片段，每行格式：编号|文本。",
+        "本书已知角色：%s。" % role_hint,
+        "请为每一行判断说话人并给出情感标签：",
+        "· speaker：已知角色名之一；叙述/描写行填\"旁白\"；实在无法判断填\"未知\"；",
+        "  对话里的\"他说道/她喊道\"要结合上下文指代判断具体是谁；",
+        "· emotion 只能是：平静、温和、低沉、激动、悲伤。",
+        "只输出 JSON 数组，不要解释：",
+        '[{"id":1,"speaker":"张三","emotion":"平静"}]',
+        "",
+    ]
+    for idx, text in lines:
+        out.append("%d|%s" % (idx, text[:80]))
+    return "\n".join(out)
+
+
+def parse_annot_output(text, valid_ids):
+    """解析逐句标注。返回 {句id: (说话人, 情感)}；完全失败抛 AIError。"""
+    body = str(text or "")
+    out = {}
+    start, end = body.find("["), body.rfind("]")
+    if start != -1 and end > start:
+        try:
+            arr = json.loads(body[start:end + 1])
+            if isinstance(arr, list):
+                for item in arr:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        sid = int(item.get("id"))
+                    except (TypeError, ValueError):
+                        continue
+                    if sid not in valid_ids:
+                        continue
+                    sp = str(item.get("speaker", "")).strip() or "未知"
+                    em = str(item.get("emotion", "")).strip()
+                    if em not in EMOTION_RATE:
+                        em = "平静"
+                    out[sid] = (sp, em)
+        except Exception:
+            out = {}
+    if not out:
+        tail = body.strip()[-160:] or "(空)"
+        raise AIError("AI 逐句标注无法解析，输出尾部：%s"
+                      % tail.replace("\n", " "))
+    return out
+
+
+def annotate_sentences(data_dir, lines, known_roles, timeout_s=None):
+    """后台标注一组句子。lines: [(句id, 文本)]。
+
+    返回 {句id: (说话人, 情感)}。失败抛 AIError（可读原因）。
+    提示词同样走临时文件（Errno 7 防线），绝不进命令行。
+    """
+    ok, reason = model_ready(data_dir)
+    if not ok:
+        raise AIError(reason)
+    runner = find_runner()
+    prompt = build_annot_prompt(lines, known_roles)
+    if len(prompt) > MAX_PROMPT_CHARS:
+        # 只保留前一部分句子（块过大的兜底，正常分块不会触发）
+        prompt_lines = build_annot_prompt(
+            lines[:max(1, len(lines) * MAX_PROMPT_CHARS // max(1, len(prompt)))],
+            known_roles)
+        prompt = prompt_lines[:MAX_PROMPT_CHARS]
+    prompt_file = os.path.join(data_dir, MODEL_DIR_NAME, "annot_prompt.tmp")
+    try:
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write(prompt)
+    except OSError as err:
+        raise AIError("标注提示词写入失败：%s" % err)
+    cmd = [runner, "-m", model_path(data_dir),
+           "--single-turn", "--no-display-prompt", "--simple-io",
+           "-f", prompt_file, "-n", str(GEN_TIMEOUT), "-c", str(CTX_SIZE),
+           "-t", "0.2", "--top-p", "0.8"]
+    out_file = os.path.join(data_dir, MODEL_DIR_NAME, "annot_out.tmp")
+    err_file = os.path.join(data_dir, MODEL_DIR_NAME, "annot_err.tmp")
+    started = time.time()
+    timeout_s = timeout_s or ANALYZE_TIMEOUT_S
+    stderr_tail = "(无日志)"
+    try:
+        with open(out_file, "wb") as fo, open(err_file, "wb") as fe:
+            proc = subprocess.Popen(cmd, stdout=fo, stderr=fe,
+                                    stdin=subprocess.DEVNULL)
+            while proc.poll() is None:
+                if time.time() - started > timeout_s:
+                    proc.kill()
+                    raise AIError("AI 标注超时（%.0f秒）" % timeout_s)
+                time.sleep(2)
+        rc = proc.returncode
+    except AIError:
+        raise
+    except Exception as err:
+        raise AIError("无法启动 AI 标注进程：%s" % err)
+    finally:
+        try:
+            with open(err_file, "r", encoding="utf-8",
+                      errors="replace") as f:
+                stderr_tail = f.read()[-300:]
+        except OSError:
+            pass
+        for stale in (err_file, prompt_file):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    if rc != 0:
+        raise AIError("AI 标注进程异常退出（码%d）：%s"
+                      % (rc, stderr_tail.strip()[-200:] or "(无日志)"))
+    with open(out_file, "r", encoding="utf-8", errors="replace") as f:
+        output = f.read()
+    try:
+        os.remove(out_file)
+    except OSError:
+        pass
+    return parse_annot_output(output, {i for i, _t in lines})
+
+
+# ---------------------------------------------------------------------------
 # 主入口：跑一次分析
 # ---------------------------------------------------------------------------
 def analyze(data_dir, characters, progress_cb=None, timeout_s=ANALYZE_TIMEOUT_S):

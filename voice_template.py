@@ -141,7 +141,19 @@ def slot_category(slot_id: str) -> str:
 
 
 def voice_friendly(name: str) -> str:
-    """zh-CN-YunxiNeural → 云希；未知音色原样返回。"""
+    """zh-CN-YunxiNeural → 云希；vits:N → 本地音色短名；未知原样返回。"""
+    if isinstance(name, str) and name.startswith("vits:"):
+        try:
+            sid = int(name.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return name
+        try:
+            import vits_tts
+            g = vits_tts.get_labels(
+                vits_tts._current_data_dir[0] or ".").get(sid)
+        except Exception:
+            g = None
+        return "音色%d号（%s）" % (sid + 1, g or "未标注")
     return VOICE_FRIENDLY.get(name, name or "默认")
 
 

@@ -1,0 +1,79 @@
+[PASS] layout: body 贴合顶栏下沿 gap=0.0
+[PASS] layout: scroll 被摆进 body svY=136
+[PASS] layout: 保镖自愈复位错位 fixes=1
+[PASS] edge: 播放期间预取生效 early=4
+[PASS] edge: 全部句子缓存并播完 cached=8/8
+[PASS] edge: 预取并行写出后续3句(不含当前句) cached=3 calls=['后续一。', '后续二。', '后续三。']
+[PASS] edge: 预取覆盖 index+1/+2/+3 calls=['后续一。', '后续二。', '后续三。']
+[PASS] edge: 位置前进即认定在出声(isPlaying 恒false也不误判) playing=True pos=300
+[PASS] edge: 位置在走 → 无进展计时归零 age=0.000
+[PASS] edge: 位置冻结时仍原样返回毫秒位置（不丢成 -1） playing=False pos=300
+[PASS] edge: 无声音进展计时会往上走（真卡死能检出） age=0.251
+[PASS] edge: 合成等待中不算卡死 age=0.000
+[PASS] edge: recover 清掉当前句坏缓存并重开链路 content=None gen=0->1
+[PASS] edge: skip_current 跳过当前句继续往下 index=2
+[PASS] advance: 位置在走时绝不推进(isPlaying 恒false) index=0
+[PASS] advance: 句中停住不切句（交给卡死自检重开本句） index=0
+[PASS] advance: 位置到末尾才推进 index=1
+[PASS] advance: 读不到位置时长时静止约0.6s兜底推进 index=2 frozen=3
+[PASS] config: 备份导出/导入 
+[PASS] history: 最近打开的排前面 ['乙书', '甲书']
+[PASS] history: 单本删除 ['乙书']
+[PASS] history: 清空后当前书保留(书名/断点) hist=[('k2', '/p/b.txt', '乙书', '2026-10-05 17:07:07')]
+[PASS] popup@400/dark: 文字未被裁切 
+[PASS] popup@400/dark: 对比度≥4.5 主文字/弹窗底=12.7 次要文字/弹窗底=6.1 按钮字/按钮底=9.9 主按钮字/主色底=4.9
+[PASS] popup@400/dark: 切主题即时换色 未刷新: 
+[PASS] popup@400/light: 文字未被裁切 
+[PASS] popup@400/light: 对比度≥4.5 主文字/弹窗底=17.1 次要文字/弹窗底=5.0 按钮字/按钮底=13.6 主按钮字/主色底=5.4
+[PASS] popup@400/light: 切主题即时换色 未刷新: 
+[PASS] popup@360/dark: 文字未被裁切 
+[PASS] popup@360/dark: 对比度≥4.5 主文字/弹窗底=12.7 次要文字/弹窗底=6.1 按钮字/按钮底=9.9 主按钮字/主色底=4.9
+[PASS] popup@360/dark: 切主题即时换色 未刷新: 
+[PASS] popup@360/light: 文字未被裁切 
+[PASS] popup@360/light: 对比度≥4.5 主文字/弹窗底=17.1 次要文字/弹窗底=5.0 按钮字/按钮底=13.6 主按钮字/主色底=5.4
+[PASS] popup@360/light: 切主题即时换色 未刷新: 
+[PASS] popup@320/dark: 文字未被裁切 
+[PASS] popup@320/dark: 对比度≥4.5 主文字/弹窗底=12.7 次要文字/弹窗底=6.1 按钮字/按钮底=9.9 主按钮字/主色底=4.9
+[PASS] popup@320/dark: 切主题即时换色 未刷新: 
+[PASS] popup@320/light: 文字未被裁切 
+[PASS] popup@320/light: 对比度≥4.5 主文字/弹窗底=17.1 次要文字/弹窗底=5.0 按钮字/按钮底=13.6 主按钮字/主色底=5.4
+[PASS] popup@320/light: 切主题即时换色 未刷新: 
+[PASS] jump: 章节识别正常 chapters=[('第一章 开头', 0), ('第二章 后续', 3)]
+[PASS] jump: 下一章只定位不朗读 pos=3 state=stopped
+[PASS] jump: 书签跳转只定位不朗读 pos=1 state=stopped
+[PASS] jump: 目录选章只定位不朗读 pos=3 state=stopped
+[PASS] jump: 跳转不再调用 play() calls=[]
+[PASS] jump: 朗读中跳转先暂停、且不调 play pause=2 play=[]
+[PASS] longpress: 从长按的段落开始（不再多加 _view_start） played=[4] want=[4] view_start=3
+[PASS] toc_follow: 打开目录后持有 RecycleView 
+[PASS] toc_follow: 仅当前章(6)被高亮 flags=[False, False, False, False, False, False, True, False, False, False, False, False, False, False, False, False, False, False, False, False]
+[PASS] toc_follow: 换章后跟随到新章(12) flags=[False, False, False, False, False, False, False, False, False, False, False, False, True, False, False, False, False, False, False, False]
+[PASS] toc_follow: 弹窗关闭后清空 _chapter_rv 
+[PASS] switch: 旧后端被真正停掉（不会再两个声音同时念） stopped=1
+[PASS] switch: 停旧后端时不广播 STOPPED（前台服务/通知不闪） events=['playing']
+[PASS] switch: 新后端接上并继续朗读 active=local events=['playing']
+[PASS] switch: 进度搬到新后端同一段 para=1
+[PASS] freeze: 正常 0.2s 间隔不算冻结 events=0
+[PASS] freeze: 闲置被冻只记总数、不计入播放中 all=1 play=0
+[PASS] freeze: 播放中被冻单独计数（这才是熄屏停读的成因） all=2 play=1 gap=65.0
+[PASS] freeze: 记录「播放中被冻结」标志 
+[PASS] keepalive: 未白名单时提示一次且只一次 shown=1
+[PASS] keepalive: 已白名单不打扰 shown=[]
+[PASS] keepalive: 状态未知时不打扰 shown=[]
+[PASS] play: 起播失败自动重试一次即成功 made=2 err=[]
+[PASS] play: 连续失败时报错带步骤名并跳过继续 err=['Edge 播放失败(setDataSource→重试也失败)：java.lang.IllegalStateException'] index=1
+[PASS] media: 播放中的重复播放命令不再反转成暂停 state=playing log=[]
+[PASS] media: 暂停命令幂等 state=paused log=['pause']
+[PASS] media: 暂停中收到播放命令会续播 state=playing log=['pause', 'resume']
+[PASS] media: 停止态收到播放命令开始朗读 log=['play']
+[PASS] media: 外部命令留痕含来源 n=5 last=播放@17:07:08 来源=通知栏/耳机
+[PASS] media: 旧 playpause 重复命令被去重（不会被反成播放） state=paused log=['pause']
+[PASS] voice_editor: 打开不抛异常 
+[PASS] ai: 提示词含角色与格式要求 
+[PASS] ai: JSON 输出解析并映射门类 {'张三': '中年叔叔', '夏弥': '少女'}
+[PASS] ai: 跑飞输出的正则兜底 {'张三': '男角色', '夏弥': '少女'}
+[PASS] ai: 解析失败给可读报错 AI 输出无法解析（模型可能没按格式回答），输出尾部：对不起我不知道
+[PASS] ai: 未导入模型给可读状态 
+[PASS] ai: 合法 GGUF 通过校验 
+[PASS] ai: 未覆盖角色保持原猜测 
+TOTAL: 78/78 passed

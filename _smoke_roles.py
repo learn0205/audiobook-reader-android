@@ -121,7 +121,7 @@ def main_run():
     app._engine.set_voice_resolver(app._role_voice_resolver)
     try:
         app._engine.load(app._paragraphs)   # 让 Edge 后端有句子可查
-        edge = app._engine._ensure_edge()
+        edge = app._engine._ensure_local()
         params = edge._voice_params_for(0)
         # 楚子航绑定男角色1；第 6 步已把该编号改成云健
         check("逐句解析出角色参数", params[0] == "zh-CN-YunjianNeural",

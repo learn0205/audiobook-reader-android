@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tts_engine.py —— 统一语音引擎路由器 + 微软 Edge 在线 TTS 后端。
+"""tts_engine.py —— 统一语音引擎路由器 + 本地离线 TTS（VITS）后端。
 
 为什么需要这一层？
   原 app 只有一个「系统原生 TTS」引擎（tts_android.AndroidTTS），main.py 直接持有它。
@@ -9,13 +9,13 @@
 
     ReaderTTS（本模块）
       ├── _android : AndroidTTS   （系统引擎，默认，离线）
-      └── _edge    : EdgeTTS      （在线云端，按需懒加载）
+      └── _local   : LocalTTS     （本地离线合成，懒加载）
 
   main.py 仍然只持有唯一的 self._engine（即 ReaderTTS），调用接口与 AndroidTTS 完全一致，
   路由器根据当前所选音色的「来源」自动在 two 后端之间切换，并对 main.py 透明。
 
-EdgeTTS 后端（EdgeTTS 类）要点：
-  · 合成走 edge_tts_client（纯标准库 WebSocket 实现，p4a 可直接打包）；
+LocalTTS 后端（LocalTTS 类）要点：
+  · 合成走 vits_tts（sherpa-onnx VITS，完全离线，无任何网络请求）；
   · 合成是阻塞网络 IO，放子线程；合成完回到主线程用 android.media.MediaPlayer 播放；
   · 播放推进用轮询 MediaPlayer.isPlaying() 兜底（与系统引擎一样，vivo 的回调不可靠）；
   · 全部 jnius / MediaPlayer 调用都做桌面环境降级，桌面可 import、可跑逻辑测试。
@@ -121,7 +121,7 @@ def _post_to_main(fn):
 # ============================================================================
 #  Edge 在线 TTS 后端
 # ============================================================================
-class EdgeTTS:
+class LocalTTS:
     """Edge 在线语音引擎：逐句合成 mp3 → MediaPlayer 播放 → 播完推进下一句。
 
     公开方法与 AndroidTTS 完全一致（main.py / ReaderTTS 都按这个接口调用）。
@@ -304,18 +304,22 @@ class EdgeTTS:
 
     def get_voices(self):
         """返回 Edge 音色列表（含 source 标记），由 ReaderTTS 负责与系统音色合并。"""
-        # 真正的列表是网络拉取的，放在 edge_tts_client.list_voices()；
+        # 真正的列表在 ReaderTTS 层合并（本地 VITS 音色）。
         # 这里只返回「已选音色名」，合并逻辑在 Router 层。
         return []
 
     def _set_cache_dir(self, base):
         if base:
             self._user_data_dir = base
-            self._cache_dir = os.path.join(base, "edge_cache")
+            self._cache_dir = os.path.join(base, "tts_cache")
             try:
                 os.makedirs(self._cache_dir, exist_ok=True)
             except Exception:
                 pass
+
+    def set_book_tag(self, tag):
+        """当前书的缓存子目录（按书隔离，删书时可整目录清理）。"""
+        self._book_tag = str(tag or "_common")
 
     # ==================== 书籍数据 ====================
     def load(self, paragraphs):
@@ -560,7 +564,7 @@ class EdgeTTS:
         # ⚠️ 这里必须传**原始句子字符串**：_synthesize_and_play 内部会调
         # _synth_text_for(sentence) 做换算。之前误传了 self._synth_text_for(sentence)
         # 的**返回值（元组）**，于是子线程里又换算一次 → text 变成嵌套元组
-        # → edge_tts_client 里 su.escape(tuple) 抛
+        # → 合成入口拿到元组再转义时抛
         #   "'tuple' object has no attribute 'replace'"
         # → 表现为「选中 Edge 音色提示合成失败」，而且**所有 Edge 音色都失败**。
         args = (self._index, sentence, gen)
@@ -598,22 +602,34 @@ class EdgeTTS:
         key = hashlib.md5(
             ("%s|%s|%s|%s|%s" % (voice, sentence, rate, pitch, volume)
              ).encode("utf-8")).hexdigest()
-        return os.path.join(self._cache_dir or ".", key + ".mp3")
+        # 按书分子目录（set_book_tag 注入，删书时整目录清理）
+        sub = getattr(self, "_book_tag", "_common")
+        return os.path.join(self._cache_dir or ".", sub, key + ".wav")
 
     def _synthesize_and_play(self, sent_index, sentence, generation):
         if generation != self._generation:
             return
         try:
-            import edge_tts_client
+            import vits_tts
+            vits_tts._current_data_dir[0] = self._user_data_dir or "."
             # 多角色：这句用说话人自己的音色/语速/音调合成（无绑定则全局参数）
             params = self._voice_params_for(sent_index)
             voice, rate, pitch, volume = params
             path = self._cache_path(sentence, params=params)
-            # 命中缓存则跳过网络合成
+            # 命中缓存则跳过合成（本地合成有音频缓存，避免重复推理）
             if not (self._cache_dir and os.path.exists(path)):
-                edge_tts_client.synthesize_to_file(
-                    sentence, voice, path, rate=rate, pitch=pitch,
-                    volume=volume)
+                try:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    vits_tts.synthesize_to_file(
+                        sentence, voice, path, rate=rate, pitch=pitch,
+                        volume=volume)
+                except Exception as serr:
+                    # 本地合成失败：跳过当前片段 + 记录日志 + 继续下一段
+                    # （规格要求：绝不卡死 App；连续失败由 _on_synth_error 停机）
+                    self._error_count += 1
+                    self.on_error("本地合成失败已跳过该句：%s" % serr)
+                    _post_to_main(lambda: self._on_synth_error(generation))
+                    return
                 self._prune_cache(keep_path=path)
             if generation != self._generation:
                 return
@@ -780,12 +796,14 @@ class EdgeTTS:
 
         def _one(idx, sentence, path, key):
             try:
-                import edge_tts_client
+                import vits_tts
+                vits_tts._current_data_dir[0] = self._user_data_dir or "."
                 if generation != self._generation:
                     return
                 params = self._voice_params_for(idx)
                 voice, rate, pitch, volume = params
-                edge_tts_client.synthesize_to_file(
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                vits_tts.synthesize_to_file(
                     sentence, voice, path, rate=rate, pitch=pitch,
                     volume=volume)
                 self._prune_cache(keep_path=path)
@@ -886,7 +904,7 @@ class ReaderTTS:
     """把「系统 TTS」和「Edge 在线 TTS」合并成一个引擎，对 main.py 透明。
 
     调用方（main.py）只感知一个 ReaderTTS，方法签名与 AndroidTTS 一致。
-    内部根据当前所选音色的来源，把请求转发给 _android 或 _edge 后端。
+    内部根据当前所选音色的来源，把请求转发给 _android 或 _local 后端。
     """
 
     def __init__(self, on_progress=None, on_paragraph=None, on_state=None,
@@ -910,7 +928,7 @@ class ReaderTTS:
             on_error=self.on_error,
             on_voices=self._on_android_voices,
         )
-        self._edge = None                 # 懒加载
+        self._local = None                 # 懒加载
         self._active = "android"
         self._paragraphs = []
         self._position = (0, 0)           # (段落, 字符) 切换后端时用于恢复
@@ -918,7 +936,7 @@ class ReaderTTS:
         self._voice_source = "android"
         # 多角色逐句音色解析器（main.py 注入；仅 Edge 后端支持多角色）
         self._voice_resolver = None
-        self._edge_voices = []             # Edge 音色缓存（网络拉取后填充）
+        self._local_voices = []             # Edge 音色缓存（网络拉取后填充）
         self._merged_voices = []           # 合并后的音色列表（供 UI）
 
     # ---- 引擎代理：把 on_voices 收口，合并后再上报给 main.py ----
@@ -940,8 +958,8 @@ class ReaderTTS:
                   for v in sys_voices]
         # 统一过滤：普通话中文 + 英文（系统引擎里的粤语/其他语言剔除）
         tagged = [v for v in tagged if self._mandarin_or_english(v)]
-        edge_voices = self._edge_voices
-        # 系统音色在前、Edge 在线音色居中
+        edge_voices = self._local_voices
+        # 系统音色在前、本地离线音色在后
         merged = tagged + edge_voices
         self._merged_voices = merged
         self.on_voices(merged)
@@ -950,44 +968,35 @@ class ReaderTTS:
     def start(self):
         self._android.start()
         # Edge 音色是网络拉取，后台异步获取，拿到后合并进列表
-        threading.Thread(target=self._fetch_edge_voices, daemon=True).start()
+        threading.Thread(target=self._build_local_voices, daemon=True).start()
 
-    def _fetch_edge_voices(self):
+    def _build_local_voices(self):
+        """本地 VITS 音色列表（fanchen-C，模型导入后可用；无网络请求）。"""
         try:
-            import edge_tts_client
-            raw = edge_tts_client.list_voices()
-            edge = []
-            for v in raw:
-                locale = v.get("Locale", "")
-                # 只保留 普通话中文（zh-CN*）与英文（en-*）音源，
-                # 粤语(zh-HK)/台湾(zh-TW)/其他语言一律不进列表
-                if not (locale.startswith("zh-CN")
-                        or locale.startswith("en")):
-                    continue
-                short = v.get("ShortName", "")
-                # 从 ShortName 末段取好读的中文音色调名，例如
-                # zh-CN-YunxiNeural -> "Yunxi"，比 FriendlyName 的 "Microsoft…" 更直观
-                parts = short.split("-")
-                neural = parts[-1] if parts else short
-                friendly = neural.replace("Neural", "") or short
-                gender = "女" if v.get("Gender") == "Female" else "男"
-                label = "%s（Edge·%s·%s）" % (friendly, locale, gender)
-                edge.append({
-                    "name": short, "label": label, "locale": locale,
-                    "source": "edge", "gender": gender,
+            import vits_tts
+            vits_tts._current_data_dir[0] = self._user_data_dir or "."
+            local = []
+            for name, label in vits_tts.get_instance(
+                    self._user_data_dir or ".").list_speakers():
+                local.append({
+                    "name": name, "label": "%s（VITS·离线）" % label,
+                    "locale": "zh-CN", "source": "local", "gender": "离线",
                 })
-            edge.sort(key=lambda x: (0 if x["locale"].startswith("zh-CN") else 1, x["label"]))
-            self._edge_voices = edge
-            from kivy.clock import Clock
-            Clock.schedule_once(lambda dt: self._merge_and_report(
-                [dict(x, source="android") for x in self._android.get_voices()]), 0)
+            self._local_voices = local
         except Exception as e:
-            # 拉取失败不该影响系统音色；仅上报错误（去重由 main.py 处理）
-            self.on_error("Edge 音色列表获取失败（可稍后重试）：%s" % e)
+            self._local_voices = []
+            self.on_error("本地音色列表获取失败：%s" % e)
+        from kivy.clock import Clock
+        Clock.schedule_once(lambda dt: self._merge_and_report(
+            [dict(x, source="android") for x in self._android.get_voices()]), 0)
+
+    def refresh_local_voices(self):
+        """VITS 模型导入/下载完成后调用：重算音色列表并通知 UI。"""
+        self._build_local_voices()
 
     def is_ready(self):
         # 当前活跃后端是否就绪；系统引擎初始化较慢，Edge 始终就绪
-        if self._active == "edge":
+        if self._active == "local":
             return True
         return self._android.is_ready()
 
@@ -1060,11 +1069,11 @@ class ReaderTTS:
         return self._merged_voices
 
     def _backend(self):
-        return self._android if self._active == "android" else self._ensure_edge()
+        return self._android if self._active == "android" else self._ensure_local()
 
-    def _ensure_edge(self):
-        if self._edge is None:
-            self._edge = EdgeTTS(
+    def _ensure_local(self):
+        if self._local is None:
+            self._local = LocalTTS(
                 on_progress=self.on_progress,
                 on_paragraph=self.on_paragraph,
                 on_state=self.on_state,
@@ -1072,23 +1081,23 @@ class ReaderTTS:
                 on_error=self.on_error,
                 on_voices=lambda *a: None,
             )
-            self._edge.start()
-            self._edge._set_cache_dir(self._user_data_dir)
-            self._edge.set_speed(self._android._speed)
-            self._edge.set_pitch(self._android._pitch)
-            self._edge.set_intonation(self._android._intonation)
-            self._edge.set_voice(self._voice_name)
-            self._edge.set_voice_resolver(self._voice_resolver)
-            self._edge.load(self._paragraphs)
-        return self._edge
+            self._local.start()
+            self._local._set_cache_dir(self._user_data_dir)
+            self._local.set_speed(self._android._speed)
+            self._local.set_pitch(self._android._pitch)
+            self._local.set_intonation(self._android._intonation)
+            self._local.set_voice(self._voice_name)
+            self._local.set_voice_resolver(self._voice_resolver)
+            self._local.load(self._paragraphs)
+        return self._local
 
     # ==================== 书籍数据 ====================
     def load(self, paragraphs):
         self._paragraphs = list(paragraphs)
         self._position = (0, 0)
         self._android.load(paragraphs)
-        if self._edge is not None:
-            self._edge.load(paragraphs)
+        if self._local is not None:
+            self._local.load(paragraphs)
 
     def get_position(self):
         return self._backend().get_position()
@@ -1096,18 +1105,18 @@ class ReaderTTS:
     # ==================== 参数 ====================
     def set_speed(self, value):
         self._android.set_speed(value)
-        if self._edge is not None:
-            self._edge.set_speed(value)
+        if self._local is not None:
+            self._local.set_speed(value)
 
     def set_pitch(self, value):
         self._android.set_pitch(value)
-        if self._edge is not None:
-            self._edge.set_pitch(value)
+        if self._local is not None:
+            self._local.set_pitch(value)
 
     def set_intonation(self, enabled):
         self._android.set_intonation(enabled)
-        if self._edge is not None:
-            self._edge.set_intonation(enabled)
+        if self._local is not None:
+            self._local.set_intonation(enabled)
 
     def set_voice(self, name):
         """切换音色：按 name 在合并列表里查来源，必要时切换后端并恢复进度。"""
@@ -1119,15 +1128,22 @@ class ReaderTTS:
             self._switch_backend(src)
         self._backend().set_voice(name)
 
-    def set_voice_resolver(self, fn):
-        """注入多角色逐句音色解析器（仅 Edge 后端消费；系统引擎忽略）。
+    def set_book_tag(self, tag):
+        """当前书的缓存子目录标签（透传给本地合成后端）。"""
+        self._book_tag = str(tag or "_common")
+        for be in (self._android, self._local):
+            if be is not None and hasattr(be, "set_book_tag"):
+                be.set_book_tag(tag)
 
-        切换到 Edge 后端时由 _ensure_edge 带过去，因此先切后端再注入/
+    def set_voice_resolver(self, fn):
+        """注入多角色逐句音色解析器（仅本地合成后端消费；系统引擎忽略）。
+
+        切换到本地后端时由 _ensure_local 带过去，因此先切后端再注入/
         先注入再切后端都能生效。
         """
         self._voice_resolver = fn
-        if self._edge is not None:
-            self._edge.set_voice_resolver(fn)
+        if self._local is not None:
+            self._local.set_voice_resolver(fn)
 
     def _voice_source_of(self, name):
         for v in self._merged_voices:
@@ -1153,7 +1169,7 @@ class ReaderTTS:
         para, char, _ = self._backend().get_position()
         old = self._backend()
         self._active = target
-        be = self._backend()              # 触发 _ensure_edge（若切到 edge）
+        be = self._backend()              # 触发 _ensure_local（若切到 local）
         # ★ 先停旧后端（且不广播 STOPPED），再起新后端 —— 杜绝两个引擎同时发声
         try:
             if old is not None and old is not be:
@@ -1195,5 +1211,5 @@ class ReaderTTS:
 
     def shutdown(self):
         self._android.shutdown()
-        if self._edge is not None:
-            self._edge.shutdown()
+        if self._local is not None:
+            self._local.shutdown()

@@ -81,7 +81,7 @@ def test_layout():
 
 
 def test_edge_flow():
-    import edge_tts_client
+    import vits_tts
     import tts_engine
     from tts_android import STATE_STOPPED
 
@@ -94,7 +94,7 @@ def test_edge_flow():
         time.sleep(0.02)
         return 7
 
-    edge_tts_client.synthesize_to_file = fake_synth
+    vits_tts.synthesize_to_file = fake_synth
 
     # ⚠️ 以前这里另起一个线程循环 Clock.tick()，好让「合成完 → 起播」这条
     #    Clock 投递被处理。但 Clock **不是线程安全的**：子线程 tick() 与合成
@@ -103,7 +103,7 @@ def test_edge_flow():
     #    后台泵时钟；这里只在主线程自己 tick，保持确定性。
     from kivy.clock import Clock
 
-    e = tts_engine.EdgeTTS()
+    e = tts_engine.LocalTTS()
     e._cache_dir = tempfile.mkdtemp()
     e.set_voice("zh-CN-XiaoxiaoNeural")
     e.load(["甲句。乙句！丙句？丁句；戊句…己句没有标点结尾",
@@ -137,9 +137,9 @@ def test_edge_prefetch_parallel():
 
     这是「Edge 在线语音偶尔较长间隔」修复的核心：预取提前到当前句一开始合成就
     触发、深度 3、并行，使推进时后续句基本命中本地缓存、无现场合成停顿。"""
-    import edge_tts_client
+    import vits_tts
     import tts_engine
-    from tts_engine import EdgeTTS
+    from tts_engine import LocalTTS
 
     calls = []
 
@@ -150,9 +150,9 @@ def test_edge_prefetch_parallel():
         time.sleep(0.02)
         return 7
 
-    edge_tts_client.synthesize_to_file = fake_synth
+    vits_tts.synthesize_to_file = fake_synth
 
-    e = EdgeTTS()
+    e = LocalTTS()
     e._cache_dir = tempfile.mkdtemp()        # 等同 _set_cache_dir 的底层目录
     e.set_voice("zh-CN-YunxiNeural")
     # 6 句，当前句 index=0
@@ -516,9 +516,9 @@ def test_edge_progress_signal():
     3. `recover()` 要顺手删掉当前句的坏缓存（坏 mp3 会让「重开本句」永远无声）；
     4. `skip_current()` 必须能把卡住的一句跳过去，而不是让朗读停死。
     """
-    import edge_tts_client
+    import vits_tts
     import tts_engine
-    from tts_engine import EdgeTTS
+    from tts_engine import LocalTTS
     from tts_android import STATE_PLAYING
 
     def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
@@ -526,7 +526,7 @@ def test_edge_progress_signal():
             f.write(b"FAKEMP3")
         return 7
 
-    edge_tts_client.synthesize_to_file = fake_synth
+    vits_tts.synthesize_to_file = fake_synth
 
     class _FakePlayer(object):
         """模拟「正在播、但 isPlaying() 恒 false」的 ROM。"""
@@ -549,7 +549,7 @@ def test_edge_progress_signal():
         def release(self):
             pass
 
-    e = EdgeTTS()
+    e = LocalTTS()
     e._cache_dir = tempfile.mkdtemp()
     e.set_voice("zh-CN-YunxiNeural")
     e.load(["第一句。", "第二句。", "第三句。"])
@@ -586,6 +586,7 @@ def test_edge_progress_signal():
     e._synthesizing = False
     e._index = 1
     bad = e._cache_path(e._sentences[1][1])
+    os.makedirs(os.path.dirname(bad), exist_ok=True)
     with open(bad, "wb") as f:
         f.write(b"BAD")
     gen = e._generation
@@ -624,9 +625,9 @@ def test_edge_advance_not_cut():
     另外还要保证「时长/位置不可信」（拿不到 -1）时仍有兜底：静止约 0.6s 后推进，
     绝不会因为读不到位置就永远停死。
     """
-    import edge_tts_client
+    import vits_tts
     import tts_engine
-    from tts_engine import EdgeTTS
+    from tts_engine import LocalTTS
     from tts_android import STATE_PLAYING
 
     def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
@@ -634,7 +635,7 @@ def test_edge_advance_not_cut():
             f.write(b"FAKEMP3")
         return 7
 
-    edge_tts_client.synthesize_to_file = fake_synth
+    vits_tts.synthesize_to_file = fake_synth
 
     class _LyingPlayer(object):
         """isPlaying() 恒 false（模拟问题 ROM），位置/时长可控。"""
@@ -664,7 +665,7 @@ def test_edge_advance_not_cut():
     orig_jnius = tts_engine._JNIUS_OK
     tts_engine._JNIUS_OK = True          # 让 poll_advance 走「真机分支」
     try:
-        e = EdgeTTS()
+        e = LocalTTS()
         e._cache_dir = tempfile.mkdtemp()
         e.set_voice("zh-CN-YunxiNeural")
         e.load(["第一句。", "第二句。", "第三句。"])
@@ -725,8 +726,8 @@ def test_switch_backend_stops_old():
     媒体卡片 / 唤醒锁整条拆掉，紧接着新后端起播又重建一遍（通知闪一下、
     锁屏媒体卡片被清）。切换对外应该是一次原子的转移。
     """
-    import edge_tts_client
-    from tts_engine import ReaderTTS
+    import vits_tts
+    from tts_engine import LocalTTS, ReaderTTS
     from tts_android import STATE_PLAYING, STATE_STOPPED
 
     def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
@@ -734,7 +735,7 @@ def test_switch_backend_stops_old():
             f.write(b"FAKEMP3")
         return 7
 
-    edge_tts_client.synthesize_to_file = fake_synth
+    vits_tts.synthesize_to_file = fake_synth
 
     class _StubBackend(object):
         """假的系统引擎：只记录被调用了什么。"""
@@ -779,21 +780,21 @@ def test_switch_backend_stops_old():
     r._android = stub
     r._paragraphs = ["第一段甲句。", "第二段乙句。"]
     r._merged_voices = [{"name": "sys-voice", "source": "android"},
-                        {"name": "zh-CN-YunxiNeural", "source": "edge"}]
+                        {"name": "vits:5", "source": "local"}]
 
-    # 系统引擎正在念第 1 段 → 切到 Edge 音色
-    r.set_voice("zh-CN-YunxiNeural")
+    # 系统引擎正在念第 1 段 → 切到本地 VITS 音色
+    r.set_voice("vits:5")
 
     check("switch: 旧后端被真正停掉（不会再两个声音同时念）",
           stub.stopped == 1, "stopped=%d" % stub.stopped)
     check("switch: 停旧后端时不广播 STOPPED（前台服务/通知不闪）",
           STATE_STOPPED not in events, "events=%s" % events)
     check("switch: 新后端接上并继续朗读",
-          r._active == "edge" and STATE_PLAYING in events,
+          r._active == "local" and STATE_PLAYING in events,
           "active=%s events=%s" % (r._active, events))
     check("switch: 进度搬到新后端同一段",
-          r._edge is not None and r._edge.get_position()[0] == 1,
-          "para=%s" % (r._edge.get_position()[0] if r._edge else None))
+          r._local is not None and r._local.get_position()[0] == 1,
+          "para=%s" % (r._local.get_position()[0] if r._local else None))
 
 
 def test_freeze_detect_and_keepalive():
@@ -901,11 +902,11 @@ def test_edge_play_retry():
     状态往往一次就好）；③ 两次都失败才跳过这一句 —— 绝不让朗读停住。
     """
     import tts_engine
-    from tts_engine import EdgeTTS
+    from tts_engine import LocalTTS
     from tts_android import STATE_PLAYING
 
     errors = []
-    e = EdgeTTS(on_error=errors.append)
+    e = LocalTTS(on_error=errors.append)
     e._cache_dir = tempfile.mkdtemp()
     e.set_voice("zh-CN-YunxiNeural")
     e.load(["第一句。", "第二句。"])

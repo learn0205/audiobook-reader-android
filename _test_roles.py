@@ -258,10 +258,10 @@ def test_role_config():
 
 # ---------------------------------------------------------------------------
 def test_engine_resolver():
-    from tts_engine import EdgeTTS
+    from tts_engine import LocalTTS as EdgeTTS
     from tts_android import STATE_STOPPED
 
-    section("EdgeTTS 逐句音色钩子（与 role_parser 联动）")
+    section("LocalTTS 逐句音色钩子（与 role_parser 联动）")
     from role_parser import analyze
     e = EdgeTTS()
     e.set_voice("zh-CN-XiaoxiaoNeural")
