@@ -1012,7 +1012,7 @@ class AudioBookApp(App, WakelockFgMixin):
     def _pick_vits_model_file(self):
         """系统文件选择器：挑 VITS 语音包 .tar.bz2（电脑下载后传手机）。"""
         if not self._android():
-            self._toast("桌面环境请把语音包解压到应用数据目录 vits/ 下")
+            self._toast("桌面环境请把语音包文件放到应用数据目录 vits/ 下")
             return
         try:
             from android import activity
@@ -1030,12 +1030,12 @@ class AudioBookApp(App, WakelockFgMixin):
 
     def _import_vits_model(self, uri):
         """复制所选语音包到私有目录并解压校验（后台线程）。"""
-        self._toast("正在导入 VITS 语音包（约290MB，请勿关闭应用）…")
+        self._toast("正在导入 VITS 语音包（约130MB，请勿关闭应用）…")
 
         def _work():
             try:
                 import vits_tts as _vt
-                part = os.path.join(self.user_data_dir, "vits_pack.tar.bz2")
+                part = os.path.join(self.user_data_dir, "vits_pack.zip")
                 try:
                     if os.path.isfile(part):
                         os.remove(part)
@@ -3777,7 +3777,7 @@ class AudioBookApp(App, WakelockFgMixin):
             box.add_widget(self._auto_label("VITS 模型：%s" % _v_reason,
                                             font_size="12sp",
                                             min_height=dp(22)))
-            btn_v_import = ABButton(text="导入 VITS 语音包（fanchen-C .tar.bz2）",
+            btn_v_import = ABButton(text="导入 VITS 语音包（fanchen-C .zip）",
                                     size_hint_y=None, height=dp(44))
             btn_v_import.bind(on_release=lambda *_: self._pick_vits_model_file())
             box.add_widget(self._safe_text(btn_v_import, min_height=dp(44)))

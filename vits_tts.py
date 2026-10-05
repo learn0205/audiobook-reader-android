@@ -123,7 +123,8 @@ def _rule_fsts(data_dir):
 
 
 def import_model(src_path, data_dir):
-    """从本地 .tar.bz2 / .zip 导入（解压到模型目录并校验）。"""
+    """从本地 .zip 导入（解压到模型目录并校验）——ZIP 是唯一推荐的
+    离线导入格式（安卓端 Python 构建缺 bz2 模块，.tar.bz2 可能解不开）。"""
     if not os.path.isfile(src_path):
         raise VitsError("选择的文件不存在")
     with open(src_path, "rb") as f:
@@ -134,8 +135,8 @@ def import_model(src_path, data_dir):
     elif head[:3] == b"BZh" or src_path.lower().endswith(".tar.bz2"):
         ok = _extract_tar(src_path, data_dir)
     else:
-        raise VitsError("不支持的文件格式（需要 fanchen-C 的 .tar.bz2 或"
-                        " .zip 语音包）")
+        raise VitsError("不支持的文件格式——需要 fanchen-C 的 "
+                        ".zip 语音包")
     if not ok:
         raise VitsError(get_state()["message"] or "语音包解压失败")
     ok, reason = model_ready(data_dir)
