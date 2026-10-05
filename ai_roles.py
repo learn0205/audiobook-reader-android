@@ -43,6 +43,11 @@ MODEL_MIN_SIZE = 500 * 1024 * 1024      # 完整模型约1.1GB，低于500MB必�
 RUNNER_LIB = "libllama-runner.so"
 ANALYZE_TIMEOUT_S = 900                 # 子进程硬超时（15分钟）
 RAM_MIN_MB = 2500                       # 跑 1.5B 至少要 ~1.5GB，留余量
+# ⚠️ Errno 7 (E2BIG) 防线：Linux 单个 argv 参数上限 128KB（MAX_ARG_STRLEN），
+# 提示词曾以 -p 整段塞进命令行，角色多时超限 → exec 直接被系统拒绝。
+# 现在提示词一律写临时文件用 -f 传入；这里再做一层截断保险（60K 字符
+# 远低于 128KB 上限，超出说明角色/样本异常多，截断不影响主体）。
+MAX_PROMPT_CHARS = 60000
 
 GEN_TIMEOUT = 800                       # 生成的最大新 token 数
 CTX_SIZE = 8192                         # 上下文窗口（提示 ~3K + 输出 800 足够）
@@ -302,6 +307,14 @@ def build_prompt(characters):
     return "\n".join(lines)
 
 
+def prepare_prompt(characters):
+    """构建提示词并做超长截断保险（见 MAX_PROMPT_CHARS 的说明）。"""
+    prompt = build_prompt(characters)
+    if len(prompt) > MAX_PROMPT_CHARS:
+        prompt = prompt[:MAX_PROMPT_CHARS] + "\n（人物过多，以下略）"
+    return prompt
+
+
 def _norm_gender(v):
     v = str(v).strip().lower()
     if v in ("男", "male", "m", "man", "他"):
@@ -404,10 +417,18 @@ def analyze(data_dir, characters, progress_cb=None, timeout_s=ANALYZE_TIMEOUT_S)
     if not characters:
         raise AIError("本书还没有识别到角色，无法分析")
 
-    prompt = build_prompt(characters)
+    prompt = prepare_prompt(characters)
+    # ⚠️ Errno 7 (E2BIG) 修复：提示词绝不走命令行（单个 argv 上限 128KB，
+    # 角色多时必炸），写临时文件用 -f 传入
+    prompt_file = os.path.join(data_dir, MODEL_DIR_NAME, "prompt.tmp")
+    try:
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write(prompt)
+    except OSError as err:
+        raise AIError("提示词临时文件写入失败（存储空间不足？）：%s" % err)
     cmd = [runner, "-m", model_path(data_dir),
            "--single-turn", "--no-display-prompt", "--simple-io",
-           "-p", prompt, "-n", str(GEN_TIMEOUT), "-c", str(CTX_SIZE),
+           "-f", prompt_file, "-n", str(GEN_TIMEOUT), "-c", str(CTX_SIZE),
            "-t", "4", "--temp", "0.2", "--top-p", "0.8"]
     out_file = os.path.join(data_dir, MODEL_DIR_NAME, "ai_out.tmp")
     err_file = os.path.join(data_dir, MODEL_DIR_NAME, "ai_err.tmp")
@@ -431,12 +452,17 @@ def analyze(data_dir, characters, progress_cb=None, timeout_s=ANALYZE_TIMEOUT_S)
     except Exception as err:
         raise AIError("无法启动 AI 进程：%s" % err)
     finally:
-        with open(err_file, "r", encoding="utf-8", errors="replace") as f:
-            stderr_tail = f.read()[-500:]
         try:
-            os.remove(err_file)
+            with open(err_file, "r", encoding="utf-8",
+                      errors="replace") as f:
+                stderr_tail = f.read()[-500:]
         except OSError:
-            pass
+            stderr_tail = "(错误日志缺失)"
+        for stale in (err_file, prompt_file):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
 
     if rc != 0:
         with open(out_file, "r", encoding="utf-8", errors="replace") as f:
