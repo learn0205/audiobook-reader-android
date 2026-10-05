@@ -9,3 +9,8 @@ __pycache__/
 books/
 config.json
 _kokoro_test/
+
+# 调试临时文件
+*.log
+_o.txt
+import_model.bin
