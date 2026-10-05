@@ -148,6 +148,10 @@ def import_model(src_path, data_dir):
 def _extract_tar(path, data_dir):
     try:
         import tarfile
+    except ImportError as err:
+        raise VitsError("解压失败：%s——安卓端不支持 bz2 解压，"
+                        "请改用「App 内下载」或 zip 格式语音包" % err)
+    try:
         _set_state("downloading", "解压语音包…", None)
         tops = ("vits-zh-hf-fanchen-C/", "./")
         with tarfile.open(path, "r:bz2") as tar:
@@ -174,7 +178,14 @@ def _extract_tar(path, data_dir):
                 if done % 50 == 0:
                     _set_state("downloading", "解压中 %d 个文件…" % done, None)
         return model_ready(data_dir)[0]
+    except VitsError:
+        raise
     except Exception as err:
+        msg = str(err)
+        if "bz2" in msg.lower():
+            # p4a 的 Python 构建可能缺 bz2 模块：tarfile.open 到这一步才炸
+            raise VitsError("解压失败：安卓端缺少 bz2 解压模块——"
+                            "请改用「App 内下载」或 zip 格式语音包")
         _set_state("error", "解压失败：%s" % err)
         return False
 
