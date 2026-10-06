@@ -79,14 +79,18 @@ def model_dir(data_dir):
 
 
 def _find(data_dir, pred):
-    """在模型目录（含一层子目录）里按谓词找文件/目录。"""
+    """在模型目录（含两层子目录）里按谓词找文件/目录（目录也能找）。"""
     base = model_dir(data_dir)
-    for root, _dirs, files in os.walk(base):
+    for root, dirs, files in os.walk(base):
         if root.count(os.sep) - base.count(os.sep) > 1:
-            continue                    # 只搜两层，dict/ 由调用方单独处理
+            continue                    # 控制遍历深度
         for name in files:
             if pred(name, os.path.join(root, name)):
                 return os.path.join(root, name)
+        for name in dirs:
+            p = os.path.join(root, name)
+            if os.path.isdir(p) and pred(name, p):
+                return p
     return ""
 
 
