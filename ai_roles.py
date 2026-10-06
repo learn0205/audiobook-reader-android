@@ -515,6 +515,10 @@ def annotate_sentences(data_dir, lines, known_roles, timeout_s=None,
             queue[qi - 1:qi] = [chunk[:half], chunk[half:]]
             total_batches += 1
             continue
+        if len(prompt) > PROMPT_CHAR_BUDGET:
+            # 无法再细分（句子太少）→ 截断句子文本，绝不死循环
+            chunk = [(i, t[:60]) for i, t in chunk]
+            prompt = build_annot_prompt(chunk, known_roles)
         total_batches += 1
         try:
             with open(prompt_file, "w", encoding="utf-8") as f:

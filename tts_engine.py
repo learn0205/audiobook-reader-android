@@ -318,8 +318,15 @@ class LocalTTS:
                 pass
 
     def set_book_tag(self, tag):
-        """当前书的缓存子目录（按书隔离，删书时可整目录清理）。"""
-        self._book_tag = str(tag or "_common")
+        """当前书的缓存子目录（按书隔离，删书时可整目录清理）。
+
+        ⚠️ tag 会成为路径段：非法字符（路径分隔符/盘符）一律转 md5。
+        """
+        tag = str(tag or "_common")
+        import hashlib
+        if not tag or not tag.isalnum():
+            tag = hashlib.md5(tag.encode("utf-8", "replace")).hexdigest()
+        self._book_tag = tag
 
     # ==================== 书籍数据 ====================
     def load(self, paragraphs):

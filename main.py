@@ -1569,9 +1569,15 @@ class AudioBookApp(App, WakelockFgMixin):
         self._book_path = doc.path
         self._book_key = ConfigManager.book_key(doc.path)
         # 本地合成音频缓存按书隔离（删书时整目录清理）
-        self._engine.set_book_tag(self._book_key)
-        self._ai_annot = {}          # {(段, 句): (说话人, 情感)}，换书即作废
+        import hashlib
+        self._engine.set_book_tag(
+            hashlib.md5(self._book_key.encode("utf-8", "replace"))
+            .hexdigest())
+        # Qwen 逐句标注上下文换书即作废（缓存文件按书命名，不受影响）
+        self._ai_annot = {}
         self._ai_annot_pending = set()
+        self._ai_annot_cache = {}
+        self._ai_annot_toast_shown = False
 
         # ---- 多角色朗读：换书即作废上一本的角色上下文 ----
         # 先摘掉逐句音色钩子（找不到映射/识别完成前按全局单音色朗读），
