@@ -3682,6 +3682,17 @@ class AudioBookApp(App, WakelockFgMixin):
         def _pick_voice(_s, text):
             name = voice_labels.get(text)
             if name:
+                if str(name).startswith("vits:"):
+                    import vits_tts as _vt
+                    _vt._current_data_dir[0] = self.user_data_dir
+                    inst = _vt.get_instance(self.user_data_dir)
+                    if inst.disabled():
+                        # 用户主动选离线音色 = 明确意图 → 自动解除一次熔断
+                        # （每次会话只自动一次；再崩仍会禁用，避免死循环）
+                        if not getattr(self, "_vts_auto_reenabled", False):
+                            inst.re_enable()
+                            self._vts_auto_reenabled = True
+                            self._toast("已自动重新启用 VITS 引擎，再试一次")
                 self._engine.set_voice(name)
                 self._config.set("voice_name", name)
                 self._config.save()
@@ -3780,6 +3791,8 @@ class AudioBookApp(App, WakelockFgMixin):
             import vits_tts as _vt
             _vt._current_data_dir[0] = self.user_data_dir
             _v_ok, _v_reason = _vt.model_ready(self.user_data_dir)
+            if _vt.get_instance(self.user_data_dir).disabled():
+                _v_reason = "引擎已禁用（上次加载失败——点下方重新启用）"
             box.add_widget(self._auto_label("VITS 模型：%s" % _v_reason,
                                             font_size="12sp",
                                             min_height=dp(22)))

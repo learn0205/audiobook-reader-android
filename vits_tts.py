@@ -422,6 +422,7 @@ class _VitsTTS:
         return os.path.isfile(os.path.join(self.data_dir, "vits", "disabled"))
 
     def re_enable(self):
+        self._crumb("手动/自动重新启用（清除 disabled+pending）")
         try:
             os.remove(os.path.join(self.data_dir, "vits", "disabled"))
         except OSError:
@@ -480,14 +481,69 @@ class _VitsTTS:
                 self._failed_msg = str(err)
             return self._tts
 
+    def _crumb(self, msg):
+        """加载面包屑：追加写 vits/load.log，原生崩溃后仍可溯源配置。"""
+        try:
+            import time as _t
+            p = os.path.join(self.data_dir, "vits", "load.log")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(_t.strftime("[%H:%M:%S] ") + msg + chr(10))
+        except Exception:
+            pass
+
+    def _validate_config(self):
+        """Python 侧全量预校验——完整镜像 v1.11.3 的 VITS Validate
+        （原生层无 try/catch，任何配置问题都会直接 abort 进程并熔断；
+        在这里全部提前拦下，给出可读错误）。
+        返回 (ok, 可读原因)。"""
+        onnx = _model_file(self.data_dir, (".onnx",), MODEL_MIN_SIZE)
+        if not onnx:
+            return False, "模型 onnx 缺失或过小"
+        self._crumb("onnx=%s (%.1fMB)" % (onnx, os.path.getsize(onnx) / 1048576.0))
+        tokens = _model_file(self.data_dir, ("tokens.txt",))
+        if not tokens:
+            return False, "缺 tokens.txt"
+        self._crumb("tokens=%s" % tokens)
+        lexicon = _model_file(self.data_dir, ("lexicon.txt", "lexicon"))
+        if not lexicon:
+            return False, "缺 lexicon 词素文件"
+        self._crumb("lexicon=%s" % lexicon)
+        dict_dir = _find(self.data_dir,
+                         lambda n, p: os.path.isdir(p) and n == "dict")
+        if dict_dir:
+            # v1.11.3 要求 dict_dir 下必须存在这 5 个 jieba 文件
+            for f in ("jieba.dict.utf8", "hmm_model.utf8",
+                      "user.dict.utf8", "idf.utf8", "stop_words.utf8"):
+                if not os.path.isfile(os.path.join(dict_dir, f)):
+                    return False, "词典缺 %s——语音包不完整，请重新导入" % f
+            self._crumb("dict_dir=%s" % dict_dir)
+        else:
+            # lexicon 非空而 dict_dir 为空：jieba 初始化会崩溃，提前拦下
+            return False, "缺 dict 分词词典目录——语音包不完整，请重新导入"
+        fsts = _rule_fsts(self.data_dir)
+        for f in fsts.split(","):
+            if f and not os.path.isfile(f):
+                return False, "规则文件缺失：%s" % f
+        if fsts:
+            self._crumb("rule_fsts=%s" % fsts)
+        return True, ""
+
     def _precheck(self):
-        """崩溃熔断 + 内存闸门（与已验证的模式一致）。"""
+        """崩溃熔断 + 全量预校验 + 内存闸门。"""
         pending = os.path.join(self.data_dir, "vits", "pending_load")
         if os.path.isfile(pending):
             open(os.path.join(self.data_dir, "vits", "disabled"), "w").close()
             self._failed = True
+            self._crumb("检测到 pending（上次原生崩溃）→ 禁用")
             raise VitsError("VITS 引擎上次加载时崩溃，已临时禁用"
                             "（可在设置里重新启用）")
+        ok, reason = self._validate_config()
+        if not ok:
+            self._failed = True
+            self._failed_msg = reason
+            self._crumb("预校验失败：%s" % reason)
+            raise VitsError(reason + "（不触碰原生引擎）")
         try:
             from jnius import autoclass
             act = autoclass("org.kivy.android.PythonActivity").mActivity
@@ -595,7 +651,12 @@ class _VitsTTS:
 
         pending = os.path.join(self.data_dir, "vits", "pending_load")
         open(pending, "w").close()
+        self._crumb("SherpaOnnxCreateOfflineTts 开始（若此后无 load.log "
+                    "新增即为原生崩溃）")
         handle = lib.SherpaOnnxCreateOfflineTts(ctypes.byref(cfg))
+        self._crumb("create 返回，加载完成 speakers=%d rate=%d"
+                    % (lib.SherpaOnnxOfflineTtsNumSpeakers(handle),
+                       lib.SherpaOnnxOfflineTtsSampleRate(handle)))
         if not handle:
             try:
                 os.remove(pending)
