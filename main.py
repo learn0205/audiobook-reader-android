@@ -1039,33 +1039,72 @@ class AudioBookApp(App, WakelockFgMixin):
         """导入电脑端标注：写 vits/voice_labels.json，自动音色立即生效。"""
         try:
             import vits_tts as _vt
+            from voice_template import VoiceTemplate, DEFAULT_SLOTS
             raw = json.loads(data)
+            if not isinstance(raw, dict):
+                raise ValueError("文件不是 JSON 对象")
             labels = {}
-            if isinstance(raw, dict) and "voice_labels" in raw:
-                raw = raw["voice_labels"]
-            for k, v in (raw or {}).items():
-                g = (v.get("gender") if isinstance(v, dict)
-                     else str(v)).strip()
-                if g in ("男", "女"):
-                    labels[str(int(k))] = g
-            if not labels:
-                self._on_error("音色标注导入失败：文件里没有有效的男/女标注")
+            if "voice_labels" in raw:
+                for k, v in (raw["voice_labels"] or {}).items():
+                    g = (v.get("gender") if isinstance(v, dict)
+                         else str(v)).strip()
+                    if g in ("男", "女"):
+                        labels[str(int(k))] = g
+            else:
+                for k, v in raw.items():
+                    g = (v.get("gender") if isinstance(v, dict)
+                         else str(v)).strip()
+                    if g in ("男", "女"):
+                        labels[str(int(k))] = g
+            # 可选第二段：显式模板映射（电脑端按声学分析生成的初始模板）
+            tpl_written = False
+            if isinstance(raw.get("voice_template"), dict):
+                slots = {}
+                for slot, params in raw["voice_template"].items():
+                    if slot not in DEFAULT_SLOTS:
+                        continue
+                    if not isinstance(params, dict) or                             not str(params.get("voice", "")).startswith("vits:"):
+                        continue
+                    try:
+                        slots[slot] = {
+                            "voice": str(params["voice"]),
+                            "pitch": max(-50, min(50, int(params.get("pitch", 0)))),
+                            "rate": max(0.5, min(2.0, float(params.get("rate", 1.0)))),
+                        }
+                    except (TypeError, ValueError):
+                        continue
+                if slots:
+                    tpl_path = os.path.join(self.user_data_dir,
+                                            "voice_template.json")
+                    tmp2 = tpl_path + ".tmp"
+                    with open(tmp2, "w", encoding="utf-8") as f:
+                        json.dump(slots, f, ensure_ascii=False, indent=1)
+                    os.replace(tmp2, tpl_path)
+                    # 内存中的模板实例重建（下一句解析即用新映射）
+                    self._voice_template = VoiceTemplate(self.user_data_dir)
+                    tpl_written = True
+            if not labels and not tpl_written:
+                self._on_error("音色标注导入失败：文件里没有有效的男/女标注"
+                               "或模板映射")
                 return
-            os.makedirs(os.path.join(self.user_data_dir, "vits"),
-                        exist_ok=True)
-            dst = _vt.labels_path(self.user_data_dir)
-            tmp = dst + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(labels, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, dst)
+            if labels:
+                os.makedirs(os.path.join(self.user_data_dir, "vits"),
+                            exist_ok=True)
+                dst = _vt.labels_path(self.user_data_dir)
+                tmp = dst + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(labels, f, ensure_ascii=False, indent=1)
+                os.replace(tmp, dst)
             try:
                 self._engine.refresh_local_voices()
             except Exception:
                 pass
             m = sum(1 for v in labels.values() if v == "男")
-            self._toast("已导入 %d 个音色标注（男 %d/女 %d），"
-                        "模板自动音色已生效" % (len(labels), m,
-                                                len(labels) - m))
+            msg = "已导入 %d 个音色性别标注（男 %d/女 %d）" % (
+                len(labels), m, len(labels) - m)
+            if tpl_written:
+                msg += "；初始音色模板已按声学分析构建"
+            self._toast(msg)
         except Exception as err:
             self._on_error("音色标注导入失败：%s" % err)
 
