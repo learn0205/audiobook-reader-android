@@ -509,6 +509,17 @@ def annotate_sentences(data_dir, lines, known_roles, timeout_s=None):
                 stderr_tail = f.read()[-300:]
         except OSError:
             pass
+        # stderr 全文留存（自检/导出诊断可查），不随临时文件一起删
+        try:
+            keep = os.path.join(data_dir, MODEL_DIR_NAME, "last_stderr.log")
+            shutil.copyfile(err_file, keep)
+        except Exception:
+            pass
+        try:
+            keep = os.path.join(data_dir, MODEL_DIR_NAME, "last_stderr.log")
+            shutil.copyfile(err_file, keep)
+        except Exception:
+            pass
         for stale in (err_file, prompt_file):
             try:
                 os.remove(stale)
@@ -516,7 +527,7 @@ def annotate_sentences(data_dir, lines, known_roles, timeout_s=None):
                 pass
     if rc != 0:
         raise AIError("AI 标注进程异常退出（码%d）：%s"
-                      % (rc, stderr_tail.strip()[-200:] or "(无日志)"))
+                      % (rc, stderr_tail.strip()[-400:] or "(无日志)"))
     with open(out_file, "r", encoding="utf-8", errors="replace") as f:
         output = f.read()
     try:
@@ -596,7 +607,7 @@ def analyze(data_dir, characters, progress_cb=None, timeout_s=ANALYZE_TIMEOUT_S)
         with open(out_file, "r", encoding="utf-8", errors="replace") as f:
             out_tail = f.read()[-200:]
         raise AIError("AI 进程异常退出（码%d）：%s %s"
-                      % (rc, stderr_tail.strip()[-200:] or "(无错误输出)",
+                      % (rc, stderr_tail.strip()[-400:] or "(无错误输出)",
                          out_tail.strip()[-80:]))
     with open(out_file, "r", encoding="utf-8", errors="replace") as f:
         output = f.read()

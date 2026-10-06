@@ -69,6 +69,10 @@ jobs:
           echo "NDK: $NDK_DIR"
           rm -rf /tmp/llama
           git clone --depth 1 --branch $LLAMA_TAG https://github.com/ggml-org/llama.cpp /tmp/llama
+          # ⚠️ BUILD_SHARED_LIBS=OFF：静态链接出单一自包含二进制。
+          #    动态构建的 llama-cli 依赖 libllama.so/libggml*.so，安卓对
+          #    App 子进程的链接器不搜索 nativeLibraryDir → 启动即报
+          #    CANNOT LINK EXECUTABLE（退出码1）
           # ⚠️ v0.5.0 里 tools/cli 只在 LLAMA_BUILD_SERVER=ON 时才进构建
           #    （tools/CMakeLists.txt：if (LLAMA_BUILD_SERVER) add_subdirectory(cli)），
           #    关掉 server 会连带 cli 一起消失 → "No rule to make target llama-cli"

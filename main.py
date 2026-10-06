@@ -2106,7 +2106,7 @@ class AudioBookApp(App, WakelockFgMixin):
 
                 def _err():
                     self._on_error("Qwen 逐句标注失败（正则模式不受影响）：%s"
-                                   % msg[:80])
+                                   % msg[:200])
                 self._post_to_main(_err)
             finally:
                 self._ai_annot_pending.discard(win)
@@ -3653,7 +3653,7 @@ class AudioBookApp(App, WakelockFgMixin):
                _layout,
                _book, _pos_s,
                (_crash_last or "无"),
-               (str(self._last_error)[:120] or "无"))
+               (str(self._last_error)[:240] or "无"))
         )
         _diag = ABDimLabel(text=_diag_text, size_hint_y=None, height=dp(92),
                            font_size="11sp", halign="left", valign="top")
