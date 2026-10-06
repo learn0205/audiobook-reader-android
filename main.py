@@ -3790,6 +3790,16 @@ class AudioBookApp(App, WakelockFgMixin):
                                    size_hint_y=None, height=dp(44))
             btn_v_label.bind(on_release=lambda *_: self._show_voice_label_panel())
             box.add_widget(self._safe_text(btn_v_label, min_height=dp(44)))
+            if _vt.get_instance(self.user_data_dir).disabled():
+                btn_v_re = ABButton(
+                    text="重新启用 VITS 引擎（上次加载失败后已禁用）",
+                    size_hint_y=None, height=dp(44))
+
+                def _v_re_enable(*_):
+                    _vt.get_instance(self.user_data_dir).re_enable()
+                    self._toast("已重新启用，下次使用 VITS 音色时再次尝试加载")
+                btn_v_re.bind(on_release=_v_re_enable)
+                box.add_widget(self._safe_text(btn_v_re, min_height=dp(44)))
         except Exception:
             pass
 

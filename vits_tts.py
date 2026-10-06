@@ -146,6 +146,9 @@ def import_model(src_path, data_dir):
     ok, reason = model_ready(data_dir)
     if not ok:
         raise VitsError("导入完成但校验未通过：%s" % reason)
+    # 重新导入完整语音包 → 自动解除旧熔断（与 Qwen 模块同款策略），
+    # 否则一次崩溃后即使换了完好的包也永远处于禁用态
+    get_instance(data_dir).re_enable()
     _set_state("ready", "VITS 模型已导入")
     return True
 
