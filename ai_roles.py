@@ -43,11 +43,15 @@ MODEL_MIN_SIZE = 500 * 1024 * 1024      # 完整模型约1.1GB，低于500MB必�
 RUNNER_LIB = "libllama-runner.so"
 ANALYZE_TIMEOUT_S = 900                 # 子进程硬超时（15分钟）
 RAM_MIN_MB = 2500                       # 跑 1.5B 至少要 ~1.5GB，留余量
-# ⚠️ Errno 7 (E2BIG) 防线：Linux 单个 argv 参数上限 128KB（MAX_ARG_STRLEN），
-# 提示词曾以 -p 整段塞进命令行，角色多时超限 → exec 直接被系统拒绝。
-# 现在提示词一律写临时文件用 -f 传入；这里再做一层截断保险（60K 字符
-# 远低于 128KB 上限，超出说明角色/样本异常多，截断不影响主体）。
-MAX_PROMPT_CHARS = 60000
+# ⚠️ 两道防线：
+# 1) Errno 7 (E2BIG)：提示词绝不走命令行（单 argv 上限 128KB），一律写
+#    临时文件 -f 传入；
+# 2) 上下文超限：CTX_SIZE=8192，提示词超窗会被引擎拒绝（真机实测
+#    42168 token > 8192）。Qwen 中文约 1 字 ≈ 1 token，留足输出与指令
+#    模板空间 → 提示词正文预算 5000 字，超出按「减样本数 → 缩样本长
+#    → 减角色」渐进瘦身而不是硬截断。
+PROMPT_CHAR_BUDGET = 5000
+MAX_PROMPT_CHARS = PROMPT_CHAR_BUDGET   # 兼容旧名
 
 GEN_TIMEOUT = 800                       # 生成的最大新 token 数
 CTX_SIZE = 8192                         # 上下文窗口（提示 ~3K + 输出 800 足够）
@@ -307,12 +311,19 @@ def build_prompt(characters):
     return "\n".join(lines)
 
 
-def prepare_prompt(characters):
-    """构建提示词并做超长截断保险（见 MAX_PROMPT_CHARS 的说明）。"""
-    prompt = build_prompt(characters)
-    if len(prompt) > MAX_PROMPT_CHARS:
-        prompt = prompt[:MAX_PROMPT_CHARS] + "\n（人物过多，以下略）"
-    return prompt
+def prepare_prompt(characters, max_chars=None):
+    """构建提示词，超出 token 预算时渐进瘦身（绝不硬截断出半句话）：
+    3句×60字 → 2句×50 → 2句×35 → 1句×30 → 1句×20 → 只留前40人。
+    """
+    max_chars = max_chars or PROMPT_CHAR_BUDGET
+    for n_s, s_len in ((3, 60), (2, 50), (2, 35), (1, 30), (1, 20)):
+        trimmed = [(n, g, [s[:s_len] for s in ss[:n_s]])
+                   for n, g, ss in characters]
+        p = build_prompt(trimmed)
+        if len(p) <= max_chars:
+            return p
+    return build_prompt([(n, g, ss[:1])
+                         for n, g, ss in characters[:40]])[:max_chars]
 
 
 def _norm_gender(v):
@@ -456,90 +467,119 @@ def parse_annot_output(text, valid_ids):
     return out
 
 
-def annotate_sentences(data_dir, lines, known_roles, timeout_s=None):
+def _split_batches(lines, batch=40):
+    """把 [(id, text)] 切成每批 batch 句（供逐句标注分批送模型）。"""
+    return [lines[i:i + batch] for i in range(0, len(lines), batch)]         if lines else []
+
+
+def _stderr_tail(path, limit=200):
+    """读 stderr 尾部（须在删除临时文件之前调用）。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()[-limit:]
+    except OSError:
+        return "(无日志)"
+
+
+def annotate_sentences(data_dir, lines, known_roles, timeout_s=None,
+                       batch=40):
     """后台标注一组句子。lines: [(句id, 文本)]。
 
-    返回 {句id: (说话人, 情感)}。失败抛 AIError（可读原因）。
-    提示词同样走临时文件（Errno 7 防线），绝不进命令行。
+    返回 {句id: (说话人, 情感)}。按 batch 句分批送模型（每批提示词
+    稳在上下文预算内，批内超预算自动对半细分），单批失败不影响其他
+    批；全部失败抛 AIError（含最后一批的 stderr 尾部）。
+    提示词走临时文件（Errno 7 防线），绝不进命令行。
     """
     ok, reason = model_ready(data_dir)
     if not ok:
         raise AIError(reason)
     runner = find_runner()
-    prompt = build_annot_prompt(lines, known_roles)
-    if len(prompt) > MAX_PROMPT_CHARS:
-        # 只保留前一部分句子（块过大的兜底，正常分块不会触发）
-        prompt_lines = build_annot_prompt(
-            lines[:max(1, len(lines) * MAX_PROMPT_CHARS // max(1, len(prompt)))],
-            known_roles)
-        prompt = prompt_lines[:MAX_PROMPT_CHARS]
+    merged = {}
+    last_fail = ""
     prompt_file = os.path.join(data_dir, MODEL_DIR_NAME, "annot_prompt.tmp")
-    try:
-        with open(prompt_file, "w", encoding="utf-8") as f:
-            f.write(prompt)
-    except OSError as err:
-        raise AIError("标注提示词写入失败：%s" % err)
-    cmd = [runner, "-m", model_path(data_dir),
-           "--single-turn", "--no-display-prompt", "--simple-io",
-           "-f", prompt_file, "-n", str(GEN_TIMEOUT), "-c", str(CTX_SIZE),
-           "-t", "0.2", "--top-p", "0.8"]
     out_file = os.path.join(data_dir, MODEL_DIR_NAME, "annot_out.tmp")
     err_file = os.path.join(data_dir, MODEL_DIR_NAME, "annot_err.tmp")
-    started = time.time()
     timeout_s = timeout_s or ANALYZE_TIMEOUT_S
-    stderr_tail = "(无日志)"
-    try:
-        with open(out_file, "wb") as fo, open(err_file, "wb") as fe:
-            proc = subprocess.Popen(cmd, stdout=fo, stderr=fe,
-                                    stdin=subprocess.DEVNULL)
-            while proc.poll() is None:
-                if time.time() - started > timeout_s:
-                    proc.kill()
-                    raise AIError("AI 标注超时（%.0f秒）" % timeout_s)
-                time.sleep(2)
-        rc = proc.returncode
-    except AIError:
-        raise
-    except Exception as err:
-        raise AIError("无法启动 AI 标注进程：%s" % err)
-    finally:
+
+    # 任务队列：先按 batch 分批，批内超预算再对半细分
+    queue = _split_batches(lines, batch)
+    done_batches = 0
+    total_batches = 0
+    qi = 0
+    while qi < len(queue):
+        chunk = queue[qi]
+        qi += 1
+        prompt = build_annot_prompt(chunk, known_roles)
+        if len(prompt) > PROMPT_CHAR_BUDGET and len(chunk) > 4:
+            half = len(chunk) // 2
+            queue[qi - 1:qi] = [chunk[:half], chunk[half:]]
+            total_batches += 1
+            continue
+        total_batches += 1
         try:
-            with open(err_file, "r", encoding="utf-8",
+            with open(prompt_file, "w", encoding="utf-8") as f:
+                f.write(prompt)
+        except OSError as err:
+            raise AIError("标注提示词写入失败：%s" % err)
+        cmd = [runner, "-m", model_path(data_dir),
+               "--single-turn", "--no-display-prompt", "--simple-io",
+               "-f", prompt_file, "-n", str(GEN_TIMEOUT),
+               "-c", str(CTX_SIZE), "-t", "0.2", "--top-p", "0.8"]
+        started = time.time()
+        rc = 0
+        stderr_tail = "(无日志)"
+        try:
+            with open(out_file, "wb") as fo, open(err_file, "wb") as fe:
+                proc = subprocess.Popen(cmd, stdout=fo, stderr=fe,
+                                        stdin=subprocess.DEVNULL)
+                while proc.poll() is None:
+                    if time.time() - started > timeout_s:
+                        proc.kill()
+                        raise AIError("AI 标注超时（%.0f秒）" % timeout_s)
+                    time.sleep(2)
+                rc = proc.returncode
+                stderr_tail = _stderr_tail(err_file, 300)
+        except AIError:
+            raise
+        except Exception as err:
+            raise AIError("无法启动 AI 标注进程：%s" % err)
+        finally:
+            # stderr 全文留存（诊断可导出）；临时文件用完即删
+            try:
+                shutil.copyfile(err_file, os.path.join(
+                    data_dir, MODEL_DIR_NAME, "last_stderr.log"))
+            except Exception:
+                pass
+            for stale in (err_file, prompt_file):
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+        if rc != 0:
+            last_fail = "进程退出码%d：%s" % (rc, stderr_tail[-160:])
+            continue
+        try:
+            with open(out_file, "r", encoding="utf-8",
                       errors="replace") as f:
-                stderr_tail = f.read()[-300:]
+                output = f.read()
+        except OSError as err:
+            last_fail = "读取输出失败：%s" % err
+            continue
+        try:
+            os.remove(out_file)
         except OSError:
             pass
-        # stderr 全文留存（自检/导出诊断可查），不随临时文件一起删
         try:
-            keep = os.path.join(data_dir, MODEL_DIR_NAME, "last_stderr.log")
-            shutil.copyfile(err_file, keep)
-        except Exception:
-            pass
-        try:
-            keep = os.path.join(data_dir, MODEL_DIR_NAME, "last_stderr.log")
-            shutil.copyfile(err_file, keep)
-        except Exception:
-            pass
-        for stale in (err_file, prompt_file):
-            try:
-                os.remove(stale)
-            except OSError:
-                pass
-    if rc != 0:
-        raise AIError("AI 标注进程异常退出（码%d）：%s"
-                      % (rc, stderr_tail.strip()[-400:] or "(无日志)"))
-    with open(out_file, "r", encoding="utf-8", errors="replace") as f:
-        output = f.read()
-    try:
-        os.remove(out_file)
-    except OSError:
-        pass
-    return parse_annot_output(output, {i for i, _t in lines})
+            merged.update(parse_annot_output(
+                output, {i for i, _t in chunk}))
+        except AIError as err:
+            last_fail = str(err)[:120]
+    if not merged and last_fail:
+        raise AIError("AI 标注失败（%d/%d 批无结果）：%s"
+                      % (total_batches, total_batches, last_fail))
+    return merged
 
 
-# ---------------------------------------------------------------------------
-# 主入口：跑一次分析
-# ---------------------------------------------------------------------------
 def analyze(data_dir, characters, progress_cb=None, timeout_s=ANALYZE_TIMEOUT_S):
     """跑一次角色分析，返回 {name: 门类}。
 
