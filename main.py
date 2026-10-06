@@ -133,6 +133,7 @@ REQUEST_EXPORT_CFG = 1002   # 导出书签/进度备份（ACTION_CREATE_DOCUMENT
 REQUEST_EXPORT_LOG = 1003   # 导出诊断日志（ACTION_CREATE_DOCUMENT）
 REQUEST_PICK_AI_MODEL = 1004  # 选择 AI 模型文件（.gguf）导入
 REQUEST_PICK_VITS_MODEL = 1005  # 选择 VITS 语音包（.tar.bz2）导入
+REQUEST_PICK_LABELS = 1006  # 选择音色标注文件（.json）导入
 
 KV = """
 # ============================================================
@@ -918,8 +919,13 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._import_ai_model(uri)
                 return
             if request_code == REQUEST_PICK_VITS_MODEL:
-                # VITS 语音包导入：SAF 给的是单文件流，复制成 tar.bz2 再解压
+                # VITS 语音包导入：复制后按文件头嗅探 zip/bz2 解压
                 self._import_vits_model(uri)
+                return
+            if request_code == REQUEST_PICK_LABELS:
+                # 音色标注导入：小文件，读文本回主线程处理
+                data = self._read_uri_text(uri)
+                self._post_to_main(lambda: self._import_voice_labels(data))
                 return
             if name.lower().endswith(".json"):
                 data = self._read_uri_text(uri)
@@ -1008,6 +1014,60 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._post_to_main(lambda: self._on_error(
                     "AI 模型下载失败：%s" % msg))
         threading.Thread(target=_work, daemon=True).start()
+
+    def _pick_label_file(self):
+        """选择电脑端标注工具导出的 voice_labels.json。"""
+        if not self._android():
+            self._toast("电脑端直接把 voice_labels.json 放到应用数据目录"
+                        " vits/ 下即可")
+            return
+        try:
+            from android import activity
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("*/*")
+            activity.bind(on_activity_result=self._on_activity_result)
+            PythonActivity.mActivity.startActivityForResult(
+                intent, REQUEST_PICK_LABELS)
+        except Exception as err:
+            self._toast(f"打开文件选择器失败：{err}")
+
+    def _import_voice_labels(self, data):
+        """导入电脑端标注：写 vits/voice_labels.json，自动音色立即生效。"""
+        try:
+            import vits_tts as _vt
+            raw = json.loads(data)
+            labels = {}
+            if isinstance(raw, dict) and "voice_labels" in raw:
+                raw = raw["voice_labels"]
+            for k, v in (raw or {}).items():
+                g = (v.get("gender") if isinstance(v, dict)
+                     else str(v)).strip()
+                if g in ("男", "女"):
+                    labels[str(int(k))] = g
+            if not labels:
+                self._on_error("音色标注导入失败：文件里没有有效的男/女标注")
+                return
+            os.makedirs(os.path.join(self.user_data_dir, "vits"),
+                        exist_ok=True)
+            dst = _vt.labels_path(self.user_data_dir)
+            tmp = dst + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(labels, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, dst)
+            try:
+                self._engine.refresh_local_voices()
+            except Exception:
+                pass
+            m = sum(1 for v in labels.values() if v == "男")
+            self._toast("已导入 %d 个音色标注（男 %d/女 %d），"
+                        "模板自动音色已生效" % (len(labels), m,
+                                                len(labels) - m))
+        except Exception as err:
+            self._on_error("音色标注导入失败：%s" % err)
 
     def _pick_vits_model_file(self):
         """系统文件选择器：挑 VITS 语音包 .tar.bz2（电脑下载后传手机）。"""
@@ -3807,10 +3867,17 @@ class AudioBookApp(App, WakelockFgMixin):
                                 size_hint_y=None, height=dp(44))
             btn_v_dl.bind(on_release=lambda *_: self._download_vits_model())
             box.add_widget(self._safe_text(btn_v_dl, min_height=dp(44)))
-            btn_v_label = ABButton(text="音色试听与性别标注（一次性，改善多角色）",
+            btn_v_label = ABButton(text="音色试听与性别标注（手机端逐个标）",
                                    size_hint_y=None, height=dp(44))
             btn_v_label.bind(on_release=lambda *_: self._show_voice_label_panel())
             box.add_widget(self._safe_text(btn_v_label, min_height=dp(44)))
+            btn_v_labels_import = ABButton(
+                text="导入音色标注（电脑端标注工具导出的 .json）",
+                size_hint_y=None, height=dp(44))
+            btn_v_labels_import.bind(
+                on_release=lambda *_: self._pick_label_file())
+            box.add_widget(self._safe_text(btn_v_labels_import,
+                                           min_height=dp(44)))
             if _vt.get_instance(self.user_data_dir).disabled():
                 btn_v_re = ABButton(
                     text="重新启用 VITS 引擎（上次加载失败后已禁用）",
