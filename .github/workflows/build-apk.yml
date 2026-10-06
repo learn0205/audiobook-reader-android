@@ -90,6 +90,10 @@ jobs:
           cmake --build /tmp/llama/build-android --target llama-cli -j4
           mkdir -p libs/arm64-v8a
           cp /tmp/llama/build-android/bin/llama-cli libs/arm64-v8a/libllama-runner.so
+          # 双保险：即使静态链接未生效（出现 libllama-cli-impl.so 等
+          # 依赖库），也把全部依赖 .so 一起打包——App 进程的
+          # LD_LIBRARY_PATH 含 nativeLibraryDir，兄弟库可被链接器找到
+          cp /tmp/llama/build-android/bin/*.so libs/arm64-v8a/ 2>/dev/null || true
           ls -la libs/arm64-v8a/
           test -f libs/arm64-v8a/libllama-runner.so
 
