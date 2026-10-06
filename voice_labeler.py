@@ -1,31 +1,30 @@
 # -*- coding: utf-8 -*-
-"""voice_labeler.py —— 电脑端 VITS 音色逐个试听与标注工具
+"""voice_labeler.py —— 电脑端 VITS 音色试听标注管理器（可随机选/改/删）
 
-用途
+用法
 ----
-在电脑上把 fanchen-C 的 187 个音色**逐个听完**，为每个音色标注
-性别（男/女）、年龄段（少年/青年/中年/老年）和备注，产出手机 App
-可直接导入的 voice_labels.json —— 导入后全部 30 个角色槽位的
-自动音色令牌（vits:auto:M1/F1...）立刻按你的标注生效。
+  pip install sherpa-onnx            # 仅首次
+  python voice_labeler.py --zip vits-zh-hf-fanchen-C.zip   # 首次解压
+  python voice_labeler.py                                  # 日常
 
-使用前提
---------
-  pip install sherpa-onnx        # 桌面推理（仅首次）
-模型：fanchen-C 语音包（ZIP 或已解压目录）
-  python voice_labeler.py --zip vits-zh-hf-fanchen-C.zip   # 首次
-  python voice_labeler.py                                   # 之后
+命令（启动后随时输入）
+----------------------
+  回车 / n          下一个未标注的音色（合成+播放+进入标注）
+  12                跳到 sid=12：合成+播放+进入标注
+  e 12 m 3 沉稳     直接修改 sid=12 的标注（m/f + 1少年2青年3中年4老年 + 备注）
+  d 12              删除 sid=12 的标注
+  r 12              重播 sid=12
+  L                 列出全部已标注
+  F 男              列出标注为「男」的所有 sid（F 女 同理）
+  S                 统计（已标/未标/男女数）
+  G                 立即导出 voice_labels.json（传手机）+ voice_notes.csv
+  a                 自动模式：连续「下一个」直到全部标完
+  q                 保存退出
 
-操作
-----
-  每个音色：自动合成并播放一句固定中文，然后输入标注：
-    m = 男    f = 女    s = 跳过（以后再说）
-    r = 重播  n = 下一个不标  b = 上一个改标注  q = 保存退出
-  性别后可追年龄段与备注：  m 3 沉稳大叔   （3=中年，2=青年，1=少年，4=老年）
-  已标过的自动跳过；--redo 11 可重标指定 sid。
 产出
 ----
-  voice_labels.json      → 传到手机，设置→导入音色标注
-  voice_notes.csv        → 全部音色的完整标注/备注表（Excel 可开）
+  voice_labels.json → 传到手机，设置 →「导入音色标注」→ 模板自动音色生效
+  voice_notes.csv   → 全量标注表（Excel 可开）
 """
 
 import argparse
@@ -39,7 +38,8 @@ import zipfile
 
 SENTENCE = "你好，这是一段音色试听，今天天气不错，我们出门走走吧。"
 AGES = {"1": "少年", "2": "青年", "3": "中年", "4": "老年"}
-STATE_FILE = "voice_labels.json"
+STATE_FILE = "voice_state.json"      # 本机进度（完整明细）
+EXPORT_FILE = "voice_labels.json"    # 导出给手机（扁平 男/女）
 NOTES_FILE = "voice_notes.csv"
 MODEL_DIR = "vits-zh-hf-fanchen-C"
 
@@ -51,7 +51,6 @@ _num_speakers = 187
 # 模型准备与合成（桌面 sherpa-onnx）
 # ---------------------------------------------------------------------------
 def prepare_model(args):
-    """确保模型目录可用。支持 --zip（自动解压，跳过 rule.far）。"""
     if os.path.isdir(args.model) and os.path.isfile(
             os.path.join(args.model, "tokens.txt")):
         return args.model
@@ -82,7 +81,6 @@ def prepare_model(args):
 
 
 def get_tts(model_dir):
-    """懒加载桌面 VITS 引擎（首次约 5-15 秒）。"""
     global _tts, _num_speakers
     if _tts is not None:
         return _tts
@@ -124,21 +122,23 @@ def get_tts(model_dir):
 
 
 def synth(sid, model_dir):
-    """合成试听句 → wav 文件，返回 (文件名, 耗时秒)。"""
+    """合成试听句 → wav（同 sid 有缓存，重播秒开）。"""
     tts = get_tts(model_dir)
+    cache = os.path.join("preview", "sid_%03d.wav" % sid)
+    if os.path.isfile(cache) and os.path.getsize(cache) > 10000:
+        return cache
     t0 = time.time()
     audio = tts.generate(SENTENCE, sid=sid, speed=1.0)
     import wave
-    path = os.path.join("preview", "sid_%03d.wav" % sid)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with wave.open(path, "wb") as w:
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    with wave.open(cache, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(audio.sample_rate)
         w.writeframes(b"".join(
             int(max(-1, min(1, s)) * 32767).to_bytes(2, "little", signed=True)
             for s in audio.samples))
-    return path, time.time() - t0
+    return cache
 
 
 def play(path):
@@ -146,11 +146,11 @@ def play(path):
         import winsound
         winsound.PlaySound(path, winsound.SND_FILENAME)
     except Exception as e:
-        print("（播放失败：%s——请手动播放 %s）" % (e, path))
+        print("（播放失败：%s——可手动播放 %s）" % (e, path))
 
 
 # ---------------------------------------------------------------------------
-# 标注状态与交互
+# 标注状态
 # ---------------------------------------------------------------------------
 def load_state():
     if os.path.isfile(STATE_FILE):
@@ -166,12 +166,10 @@ def save_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, STATE_FILE)
-    export_notes(state)
+    os.replace(tmp, STATE_FILE)          # ⚠️ 只写状态文件，绝不覆盖导出文件
 
 
 def export_notes(state):
-    """全部标注导出 CSV（Excel 可开，GBK 兼容 Windows Excel）。"""
     try:
         with open(NOTES_FILE, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
@@ -184,92 +182,176 @@ def export_notes(state):
         print("（CSV 导出失败：%s）" % e)
 
 
-def export_app_labels(state):
-    """产出手机可导入的 voice_labels.json（sid → 男/女）。"""
+def export_app_labels(state, quiet=False):
     out = {str(sid): e["gender"] for sid, e in state.items()
            if e.get("gender") in ("男", "女")}
-    with open("voice_labels.json", "w", encoding="utf-8") as f:
+    with open(EXPORT_FILE, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
-    m = sum(1 for v in out.values() if v == "男")
-    print("\n已导出 voice_labels.json（男 %d / 女 %d，共 %d 个）"
-          % (m, len(out) - m, len(out)))
-    print("把它传到手机 → 设置 → 「导入音色标注」→ 模板自动音色立刻生效")
+    if not quiet:
+        m = sum(1 for v in out.values() if v == "男")
+        print("已导出 voice_labels.json（男 %d / 女 %d）——传到手机 → "
+              "设置 →「导入音色标注」" % (m, len(out) - m))
 
 
-def ask_label(sid):
-    """交互问一个音色的标注。返回 dict 或 None(跳过)。"""
-    while True:
-        raw = input("性别 m=男 f=女 s=跳过 r=重播 q=退出: ").strip().lower()
-        if raw == "r":
-            return {"__replay__": True}
-        if raw == "q":
-            return {"__quit__": True}
-        if raw == "s":
-            return None
-        if raw in ("m", "f"):
-            gender = "男" if raw == "m" else "女"
-            age, note = "", ""
-            extra = input("年龄段 1少年 2青年 3中年 4老年（回车=青年），"
-                          "可加备注（空格分隔）: ").strip()
-            parts = extra.split(" ", 1)
-            if parts and parts[0] in AGES:
-                age = AGES[parts[0]]
-            if len(parts) > 1:
-                note = parts[1]
-            return {"gender": gender,
-                    "age": age or "青年", "note": note}
-        print("  输入 m/f/s/r/q")
+def stats(state):
+    labeled = len(state)
+    m = sum(1 for e in state.values() if e.get("gender") == "男")
+    f = sum(1 for e in state.values() if e.get("gender") == "女")
+    return labeled, _num_speakers - labeled, m, f
+
+
+def next_unlabeled(state, after=-1):
+    for sid in range(after + 1, _num_speakers):
+        if str(sid) not in state:
+            return sid
+    for sid in range(0, _num_speakers):        # 全标完则从头找可改的
+        if str(sid) not in state:
+            return sid
+    return None
+
+
+def show(sid, state):
+    e = state.get(str(sid))
+    if e:
+        print("sid=%d → %s/%s%s" % (sid, e.get("gender", "?"),
+                                    e.get("age", ""),
+                                    ("（" + e.get("note", "") + "）")
+                                    if e.get("note") else ""))
+    else:
+        print("sid=%d 未标注" % sid)
+
+
+def parse_label_args(args):
+    """e 命令参数：[m|f] [1-4] [备注...] → (gender, age, note)。"""
+    gender, age, note = None, "", ""
+    if args and args[0].lower() in ("m", "f"):
+        gender = "男" if args[0].lower() == "m" else "女"
+        args = args[1:]
+    if args and args[0] in AGES:
+        age = AGES[args[0]]
+        args = args[1:]
+    if args:
+        note = " ".join(args)
+    if gender is None:
+        print("  缺性别：e <sid> m|f [1-4] [备注]")
+        return None
+    return {"gender": gender, "age": age or "青年", "note": note}
+
+
+HELP = """命令：
+  回车/n   下一个未标注        <编号>    播放并标注该音色
+  e <编号> m|f [1-4] [备注]    直接修改标注    d <编号>  删除标注
+  r <编号> 重播                L        列出全部已标注
+  F 男|女  按性别列出          S        统计
+  G        立即导出            q        保存退出"""
 
 
 def main():
-    ap = argparse.ArgumentParser(description="电脑端 VITS 音色试听标注工具")
-    ap.add_argument("--model", default=MODEL_DIR, help="模型目录")
+    ap = argparse.ArgumentParser(description="电脑端 VITS 音色标注管理器")
+    ap.add_argument("--model", default=MODEL_DIR)
     ap.add_argument("--zip", help="语音包 ZIP（首次自动解压）")
-    ap.add_argument("--start", type=int, default=0, help="起始 sid")
-    ap.add_argument("--redo", type=int, action="append",
-                    help="强制重标指定 sid（可多次）")
     args = ap.parse_args()
 
     model_dir = prepare_model(args)
+    get_tts(model_dir)
     state = load_state()
-    redo = set(args.redo or [])
+    labeled, unlab, m, f = stats(state)
+    print("已标 %d / 未标 %d（男 %d 女 %d）" % (labeled, unlab, m, f))
+    print(HELP)
 
-    sid = args.start
-    while sid < _num_speakers:
-        if str(sid) in state and sid not in redo:
-            sid += 1
-            continue
-        print("\n[%d/%d] sid=%d" % (sid + 1, _num_speakers, sid))
+    while True:
         try:
-            path, secs = synth(sid, model_dir)
-            print("合成 %.1fs，播放中..." % secs)
-            play(path)
-        except Exception as e:
-            print("合成失败：%s" % e)
-            if input("c=继续下一个 q=退出: ").strip().lower() == "q":
-                break
-            sid += 1
-            continue
-        res = ask_label(sid)
-        if res and res.get("__quit__"):
-            break
-        if res and res.get("__replay__"):
-            play(path)
-            res = ask_label(sid)
-            if res and (res.get("__quit__") or res.get("__replay__")):
-                break
-        if res and res.get("gender"):
-            state[str(sid)] = {"sid": sid, **res}
+            raw = input("\n[vits-labeler] > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n保存退出")
             save_state(state)
-            print("→ sid=%d: %s/%s%s" % (
-                sid, res["gender"], res.get("age", ""),
-                ("（" + res.get("note", "") + "）") if res.get("note") else ""))
-        sid += 1
+            break
+        if not raw:
+            raw = "n"
+        parts = raw.split()
+        cmd = parts[0].lower()
 
-    save_state(state)
-    export_app_labels(state)
-    print("本次完成。已标 %d/%d 个；下次运行自动从上次进度继续。"
-          % (len(state), _num_speakers))
+        try:
+            if cmd in ("n", "下一个"):
+                sid = next_unlabeled(state)
+                if sid is None:
+                    print("187 个全部标注完成！G 导出即可")
+                    continue
+                path = synth(sid, model_dir)
+                show(sid, state)
+                play(path)
+                res = parse_label_args(parts[1:])
+                if res:
+                    state[str(sid)] = {"sid": sid, **res}
+                    save_state(state)
+                    show(sid, state)
+            elif cmd == "a":
+                while True:
+                    sid = next_unlabeled(state)
+                    if sid is None:
+                        print("全部完成！")
+                        break
+                    path = synth(sid, model_dir)
+                    print("[sid=%d] 播放中..." % sid)
+                    play(path)
+                    res = parse_label_args(input(
+                        "sid=%d 性别 m/f（s=跳过 q=结束自动模式）: "
+                        % sid).strip().split())
+                    if res is None:
+                        break
+                    if res.get("gender"):
+                        state[str(sid)] = {"sid": sid, **res}
+                        save_state(state)
+                        show(sid, state)
+            elif cmd.isdigit():
+                sid = int(cmd)
+                if not 0 <= sid < _num_speakers:
+                    print("sid 范围 0-%d" % (_num_speakers - 1))
+                    continue
+                path = synth(sid, model_dir)
+                show(sid, state)
+                play(path)
+                res = parse_label_args(parts[1:])
+                if res:
+                    state[str(sid)] = {"sid": sid, **res}
+                    save_state(state)
+                    show(sid, state)
+            elif cmd == "e" and len(parts) > 1 and parts[1].isdigit():
+                sid = int(parts[1])
+                res = parse_label_args(parts[2:])
+                if res:
+                    state[str(sid)] = {"sid": sid, **res}
+                    save_state(state)
+                    show(sid, state)
+            elif cmd == "d" and len(parts) > 1 and parts[1].isdigit():
+                state.pop(parts[1], None)
+                save_state(state)
+                print("sid=%s 已删除" % parts[1])
+            elif cmd == "r" and len(parts) > 1 and parts[1].isdigit():
+                play(synth(int(parts[1]), model_dir))
+            elif cmd == "l":
+                for sid in sorted(int(k) for k in state):
+                    show(sid, state)
+            elif cmd == "f" and len(parts) > 1 and parts[1] in ("男", "女"):
+                sids = sorted(int(k) for k, e in state.items()
+                              if e.get("gender") == parts[1])
+                print("%s（%d 个）: %s" % (parts[1], len(sids), sids))
+            elif cmd == "s":
+                labeled, unlab, m, f = stats(state)
+                print("已标 %d / 未标 %d（男 %d 女 %d）"
+                      % (labeled, unlab, m, f))
+            elif cmd == "g":
+                export_app_labels(state)
+                export_notes(state)
+            elif cmd in ("h", "help", "?"):
+                print(HELP)
+            elif cmd in ("q", "quit", "exit"):
+                save_state(state)
+                break
+            else:
+                print("未知命令，h 查看帮助")
+        except Exception as e:
+            print("命令出错：%s" % e)
 
 
 if __name__ == "__main__":
