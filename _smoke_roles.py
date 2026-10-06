@@ -89,7 +89,7 @@ def main_run():
     check("重置回模板参数",
           role_config.RoleMap.entry_params(app._role_map.get("楚子航"),
                                            app._voice_template)[0]
-          == "zh-CN-YunxiNeural")
+          == "vits:auto:M1")
 
     # 6) 全局模板面板 + 编辑编号
     app._show_template_panel()

@@ -734,13 +734,40 @@ class _VitsTTS:
 # ---------------------------------------------------------------------------
 # 引擎无关的便捷入口（供 tts_engine / 测试调用与打桩）
 # ---------------------------------------------------------------------------
+def resolve_voice(voice, data_dir):
+    """voice → 数字 sid。
+
+    · "vits:N" → N
+    · "vits:auto:M3" → 第 3 个被标注为「男」的音色（女=F 同理）；
+      标注不足时回退到内置分散预设 ((n-1)*11 + 偏移) % 187，
+      保证各槽位音色互不相同（性别对不对等用户标注后自动修正）。
+    """
+    voice = str(voice)
+    if voice.startswith("vits:auto:"):
+        tag = voice.split(":", 2)[2]
+        gender = tag[:1]
+        try:
+            n = max(1, int(tag[1:]))
+        except ValueError:
+            n = 1
+        want = "男" if gender == "M" else "女"
+        sids = sorted(s for s, g in get_labels(data_dir).items()
+                      if g == want)
+        if n <= len(sids):
+            return sids[n - 1]
+        offset = 0 if gender == "M" else 5
+        return ((n - 1) * 11 + offset) % EXPECTED_SPEAKERS
+    try:
+        return int(voice.split(":", 1)[1])
+    except (TypeError, ValueError, IndexError):
+        return 0
+
+
 def synthesize_to_file(text, voice, path, rate="+0%", pitch="+0Hz",
                        volume="+0%"):
-    """模块级入口：voice="vits:N"，rate 形如 "+15%"。pitch/volume 忽略。"""
-    try:
-        sid = int(str(voice).split(":", 1)[1])
-    except (TypeError, ValueError, IndexError):
-        sid = 0
+    """模块级入口：voice="vits:N" 或 "vits:auto:M1"，rate 形如 "+15%"。"""
+    data_dir = _current_data_dir[0] if _current_data_dir[0] else "."
+    sid = resolve_voice(voice, data_dir)
     try:
         speed = max(0.5, min(2.0,
                              1.0 + float(str(rate).strip("%")

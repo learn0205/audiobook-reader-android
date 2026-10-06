@@ -172,17 +172,18 @@ def test_voice_template():
         t = VoiceTemplate(tmp)
         check("默认编号数量", len(t.all_slots()) == len(DEFAULT_SLOTS))
         p = t.get("男角色1")
-        check("男角色1 默认音色", p["voice"] == "zh-CN-YunxiNeural", str(p))
+        check("男角色1 默认音色", p["voice"] == "vits:auto:M1", str(p))
 
-        t.set_slot("男角色1", "zh-CN-YunjianNeural", -12, 1.1)
+        # Edge 音色名会被自动迁移回 auto 令牌 → 落盘验证用 VITS 音色
+        t.set_slot("男角色1", "vits:12", -12, 1.1)
         t2 = VoiceTemplate(tmp)          # 重新加载验证落盘
-        check("修改后落盘", t2.get("男角色1")["voice"] == "zh-CN-YunjianNeural")
+        check("修改后落盘", t2.get("男角色1")["voice"] == "vits:12")
         check("音调/语速同步", t2.get("男角色1")["pitch"] == -12
               and abs(t2.get("男角色1")["rate"] - 1.1) < 1e-6)
 
         t2.reset_slot("男角色1")
         t3 = VoiceTemplate(tmp)
-        check("恢复默认", t3.get("男角色1")["voice"] == "zh-CN-YunxiNeural")
+        check("恢复默认", t3.get("男角色1")["voice"] == "vits:auto:M1")
 
         used = {"男角色1", "男角色2"}
         check("next_free_slot 跳过已占用", t3.next_free_slot("男角色", used)
@@ -231,19 +232,19 @@ def test_role_config():
         check("自定义参数生效", vp == ("zh-CN-YunxiaNeural", 0.8, 20), str(vp))
         vp2 = role_config.RoleMap.entry_params(rm3.get("夏弥"), tpl)
         check("未自定义者仍跟随模板",
-              vp2 == ("zh-CN-XiaoxiaoNeural", 1.0, 0), str(vp2))
+              vp2 == ("vits:auto:F1", 1.0, 0), str(vp2))
 
         # 模板修改 → 未自定义者同步、自定义者不受影响
-        tpl.set_slot("女角色1", "zh-CN-XiaoyiNeural", 5, 1.0)
+        tpl.set_slot("女角色1", "vits:auto:F7", 5, 1.0)
         vp3 = role_config.RoleMap.entry_params(rm3.get("夏弥"), tpl)
-        check("模板修改同步到跟随者", vp3[0] == "zh-CN-XiaoyiNeural", str(vp3))
+        check("模板修改同步到跟随者", vp3[0] == "vits:auto:F7", str(vp3))
         vp4 = role_config.RoleMap.entry_params(rm3.get("楚子航"), tpl)
         check("自定义者不受模板修改影响", vp4[0] == "zh-CN-YunxiaNeural")
 
         # 一键重置
         rm3.reset_custom("楚子航")
         vp5 = role_config.RoleMap.entry_params(rm3.get("楚子航"), tpl)
-        check("重置后回到模板参数", vp5[0] == "zh-CN-YunxiNeural", str(vp5))
+        check("重置后回到模板参数", vp5[0] == "vits:auto:M1", str(vp5))
 
         # 删除（无确认框的存储层行为）
         role_config.delete_map(tmp, "book-A")

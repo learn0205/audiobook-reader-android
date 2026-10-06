@@ -4,7 +4,8 @@
 设计要点
 --------
 · 模板是**全局唯一**的：所有小说共用同一套「编号角色清单」，
-  每个编号预先绑定一个 Edge 音色 + 音调(Hz) + 语速(倍率)。
+  每个编号绑定一个本地 VITS 音色（vits:auto 令牌 = 第 N 个被用户
+  标注为男/女的音色；未标注时用内置分散预设，标完即全员生效）。
 · 单本小说只保存「人名 ↔ 编号」的映射（见 role_config.py），
   **不**重复保存音色参数 —— 人名的声音参数永远按编号从本模板现查。
   所以模板一改，所有绑定该编号的人物立即同步换声音；
@@ -14,8 +15,8 @@
   回退到内置默认清单（内置清单即出厂状态，「恢复默认」也回到它）。
 
 音调/语速的单位与 Edge 对齐：
-  · pitch 用 Hz（Edge 的 pitch 参数，如 "+10Hz"），范围 ±50Hz；
-  · rate 用倍率（1.0 = 正常），换算成 Edge 的百分比由引擎负责。
+  · pitch 保留字段但 VITS 忽略；
+  · rate 用倍率（1.0 = 正常），由合成引擎按 speed 换算。
 """
 
 import json
@@ -30,41 +31,41 @@ import threading
 # ---------------------------------------------------------------------------
 DEFAULT_SLOTS = {
     # ---- 年轻/常规男声 ----
-    "男角色1":   {"voice": "zh-CN-YunxiNeural",  "pitch": 0,   "rate": 1.0},
-    "男角色2":   {"voice": "zh-CN-YunyangNeural", "pitch": -5,  "rate": 1.0},
-    "男角色3":   {"voice": "zh-CN-YunjianNeural", "pitch": 0,   "rate": 1.0},
-    "男角色4":   {"voice": "zh-CN-YunhaoNeural",  "pitch": 0,   "rate": 1.0},
-    "男角色5":   {"voice": "zh-CN-YunzeNeural",   "pitch": 0,   "rate": 1.0},
-    "男角色6":   {"voice": "zh-CN-YunfeiNeural",  "pitch": 0,   "rate": 1.0},
-    "男角色7":   {"voice": "zh-CN-YunyeNeural",   "pitch": 0,   "rate": 1.0},
-    "男角色8":   {"voice": "zh-CN-YunxiaNeural",  "pitch": 5,   "rate": 1.05},
+    "男角色1": {"voice": "vits:auto:M1", "pitch": 0, "rate": 1.0},
+    "男角色2": {"voice": "vits:auto:M2", "pitch": 0, "rate": 1.0},
+    "男角色3": {"voice": "vits:auto:M3", "pitch": 0, "rate": 1.0},
+    "男角色4": {"voice": "vits:auto:M4", "pitch": 0, "rate": 1.0},
+    "男角色5": {"voice": "vits:auto:M5", "pitch": 0, "rate": 1.0},
+    "男角色6": {"voice": "vits:auto:M6", "pitch": 0, "rate": 1.0},
+    "男角色7": {"voice": "vits:auto:M7", "pitch": 0, "rate": 1.0},
+    "男角色8": {"voice": "vits:auto:M8", "pitch": 0, "rate": 1.05},
     # ---- 中年男声（偏低偏慢） ----
-    "中年叔叔1": {"voice": "zh-CN-YunyeNeural",   "pitch": -10, "rate": 0.95},
-    "中年叔叔2": {"voice": "zh-CN-YunjianNeural",  "pitch": -8,  "rate": 0.95},
-    "中年叔叔3": {"voice": "zh-CN-YunzeNeural",    "pitch": -12, "rate": 0.92},
-    "中年叔叔4": {"voice": "zh-CN-YunyangNeural",  "pitch": -10, "rate": 0.95},
+    "中年叔叔1": {"voice": "vits:auto:M9", "pitch": 0, "rate": 0.95},
+    "中年叔叔2": {"voice": "vits:auto:M10", "pitch": 0, "rate": 0.95},
+    "中年叔叔3": {"voice": "vits:auto:M11", "pitch": 0, "rate": 0.92},
+    "中年叔叔4": {"voice": "vits:auto:M12", "pitch": 0, "rate": 0.95},
     # ---- 女声 ----
-    "女角色1":   {"voice": "zh-CN-XiaoxiaoNeural", "pitch": 0,   "rate": 1.0},
-    "女角色2":   {"voice": "zh-CN-XiaoyiNeural",   "pitch": 5,   "rate": 1.0},
-    "女角色3":   {"voice": "zh-CN-XiaoyanNeural",  "pitch": 0,   "rate": 1.0},
-    "女角色4":   {"voice": "zh-CN-XiaoyuNeural",   "pitch": 0,   "rate": 1.0},
-    "女角色5":   {"voice": "zh-CN-XiaozhenNeural", "pitch": 0,   "rate": 1.0},
-    "女角色6":   {"voice": "zh-CN-XiaohanNeural",  "pitch": 0,   "rate": 1.0},
-    "女角色7":   {"voice": "zh-CN-XiaomengNeural", "pitch": 5,   "rate": 1.05},
-    "女角色8":   {"voice": "zh-CN-XiaoxuanNeural", "pitch": 0,   "rate": 1.0},
+    "女角色1": {"voice": "vits:auto:F1", "pitch": 0, "rate": 1.0},
+    "女角色2": {"voice": "vits:auto:F2", "pitch": 0, "rate": 1.0},
+    "女角色3": {"voice": "vits:auto:F3", "pitch": 0, "rate": 1.0},
+    "女角色4": {"voice": "vits:auto:F4", "pitch": 0, "rate": 1.0},
+    "女角色5": {"voice": "vits:auto:F5", "pitch": 0, "rate": 1.0},
+    "女角色6": {"voice": "vits:auto:F6", "pitch": 0, "rate": 1.0},
+    "女角色7": {"voice": "vits:auto:F7", "pitch": 0, "rate": 1.05},
+    "女角色8": {"voice": "vits:auto:F8", "pitch": 0, "rate": 1.0},
     # ---- 老年女声（更低更慢，像长辈） ----
-    "奶奶1":     {"voice": "zh-CN-XiaoxiaoNeural", "pitch": -15, "rate": 0.9},
-    "奶奶2":     {"voice": "zh-CN-XiaoyanNeural",  "pitch": -15, "rate": 0.9},
-    "奶奶3":     {"voice": "zh-CN-XiaozhenNeural", "pitch": -15, "rate": 0.9},
-    "奶奶4":     {"voice": "zh-CN-XiaomengNeural", "pitch": -15, "rate": 0.88},
+    "奶奶1": {"voice": "vits:auto:F9", "pitch": 0, "rate": 0.9},
+    "奶奶2": {"voice": "vits:auto:F10", "pitch": 0, "rate": 0.9},
+    "奶奶3": {"voice": "vits:auto:F11", "pitch": 0, "rate": 0.9},
+    "奶奶4": {"voice": "vits:auto:F12", "pitch": 0, "rate": 0.88},
     # ---- 童声 ----
-    "童声1":     {"voice": "zh-CN-XiaoshuangNeural", "pitch": 15, "rate": 1.05},
-    "童声2":     {"voice": "zh-CN-XiaoyouNeural",   "pitch": 15, "rate": 1.0},
+    "童声1": {"voice": "vits:auto:F13", "pitch": 0, "rate": 1.1},
+    "童声2": {"voice": "vits:auto:F14", "pitch": 0, "rate": 1.0},
     # ---- 少女 ----
-    "少女1":     {"voice": "zh-CN-XiaoyiNeural",   "pitch": 12, "rate": 1.05},
-    "少女2":     {"voice": "zh-CN-XiaomengNeural", "pitch": 10, "rate": 1.0},
-    "少女3":     {"voice": "zh-CN-XiaoyanNeural",  "pitch": 8,  "rate": 1.08},
-    "少女4":     {"voice": "zh-CN-XiaoyuNeural",   "pitch": 12, "rate": 0.95},
+    "少女1": {"voice": "vits:auto:F15", "pitch": 0, "rate": 1.05},
+    "少女2": {"voice": "vits:auto:F16", "pitch": 0, "rate": 1.0},
+    "少女3": {"voice": "vits:auto:F17", "pitch": 0, "rate": 1.08},
+    "少女4": {"voice": "vits:auto:F18", "pitch": 0, "rate": 0.95},
 }
 
 # 类别名 → 该类的编号清单（保持声明顺序，自动映射时按序取用）
@@ -142,6 +143,14 @@ def slot_category(slot_id: str) -> str:
 
 def voice_friendly(name: str) -> str:
     """zh-CN-YunxiNeural → 云希；vits:N → 本地音色短名；未知原样返回。"""
+    if isinstance(name, str) and name.startswith("vits:auto:"):
+        tag = name.split(":", 2)[2]          # M1 / F12
+        g = "男" if tag[:1] == "M" else "女"
+        try:
+            n = int(tag[1:])
+        except ValueError:
+            return name
+        return "自动%s声%d号" % (g, n)
     if isinstance(name, str) and name.startswith("vits:"):
         try:
             sid = int(name.split(":", 1)[1])
@@ -182,8 +191,13 @@ class VoiceTemplate:
             for sid, params in DEFAULT_SLOTS.items():
                 v = data.get(sid)
                 if isinstance(v, dict) and v.get("voice"):
+                    voice = str(v["voice"])
+                    # Edge 音色已删除：旧绑定自动迁移到本槽位的 auto 令牌
+                    if (voice.startswith("zh-CN") or voice.startswith("en-")
+                            or "Neural" in voice or voice.startswith("kokoro:")):
+                        voice = params["voice"]
                     slots[sid] = {
-                        "voice": str(v["voice"]),
+                        "voice": voice,
                         "pitch": _clamp_pitch(v.get("pitch", 0)),
                         "rate": _clamp_rate(v.get("rate", 1.0)),
                     }

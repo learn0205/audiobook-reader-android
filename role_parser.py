@@ -100,7 +100,8 @@ _STRICT_VERB_CHARS = set("说问答喊叫骂念喝笑哭叹吼诵读讲谈议论
                          "瞪瞅盯瞧眯眨抿咬舔吐吞呼喘愣怔醒闭睁摸搓揉"
                          "拂捂掩遮跺蹲蹦窜躬俯仰摆搁翻掀揭敲叩拍击撞砸"
                          "摔扔掷抛投抢夺偷屏咧努撇缩蜷弓挺直绷合拢分掰"
-                         "扒撑扛扫挥揽搡晃怒冷顿住默停歇呆滞僵们眉哼轻不皱凝反惊痛心一双忽蹙先耸挠面苦沉突扶额")
+                         "扒撑扛扫挥揽搡晃怒冷顿住默停歇呆滞僵们眉哼轻不皱凝反惊痛心一双忽蹙先耸挠面苦沉突扶额"
+    "瘫倒僵稳站坐卧翻滚冒滚淋晒僵躺靠")
 
 # 引号前的标签：动词之前的结尾 2~4 个汉字是人名（先剥掉修饰语再取尾）
 _NAME_TAIL_RE = re.compile(r"([\u4e00-\u9fa5]{2,4})$")
@@ -239,6 +240,10 @@ _COMMON_WORDS = {
     "快速", "尴尬", "简单", "短暂", "事实", "继续", "转头", "委屈",
     "宽敞", "之一", "全场", "画面", "黑暗中", "屏幕", "一切", "年轻人",
     "老男人", "中年男人", "中年男", "为一", "所谓",
+    # 《龙族：重启人生》实测误报（正则贪婪切片）
+    "决定", "良好", "浑然不", "浑然", "全当", "此情此", "衣装笔", "衣装",
+    "一个戴", "手伸入", "包厢门", "包厢内", "记忆瞬", "汽车猛", "夕阳",
+    "锐利", "叔叔小", "徐岩岩小", "唐威瘫", "唐威身", "唐威一", "路非明",
 }
 
 # 性别 / 年龄归类线索
@@ -355,7 +360,7 @@ def _covered_by_modifiers(rest):
     return True
 
 
-def _tag_before_quote(text, open_idx):
+def _tag_before_quote(text, open_idx, registry=None):
     """在引号前的窗口里找「人名/代词 + 动词」（如：楚子航沉声道：「…」）。
 
     取引号前最多 16 字的窗口，找**第一个**说话动词。人名有两种位置：
@@ -363,6 +368,8 @@ def _tag_before_quote(text, open_idx):
          （楚子航【点点头，缓缓】道 / 施耐德【平静】道）；
       ② 名字在动词短语的**结尾**（听到这话，【楚子航】缓缓道），
          此时候选里不允许出现强动词字（防「泽抬起头」这类碎片）。
+    新人名（registry 里没登记过）必须以常见姓氏开头 —— 这是
+    「决定/良好/浑然不」这类贪婪碎片的最强一道闸（真书实测）。
     返回人名/代词或 None。
     """
     window = text[max(0, open_idx - 16):open_idx]
@@ -388,19 +395,43 @@ def _tag_before_quote(text, open_idx):
         if _is_plausible_name(cand) and not any(
                 v in cand for v in _STRICT_VERB_CHARS):
             if _covered_by_modifiers(rest):
-                return cand
+                if _known_or_surnamed(cand, registry):
+                    return cand
     # ② 名字在结尾（兜底）：候选必须以常见姓氏开头（听到这话，【楚子航】
-    # 缓缓道），否则「胸有成竹」「头也不抬」这类碎片会从这里漏进来
+    # 缓缓道），否则「胸有成竹」「头也不抬」这类碎片会从这里漏进来；
+    # 尾字再过一遍动作残片拦截（「唐威瘫」的「瘫」）
     nm = _NAME_TAIL_RE.search(prefix)
     if nm:
         cand = nm.group(1)
         if (cand[0] in _SURNAMES and _is_plausible_name(cand)
-                and not any(v in cand for v in _STRICT_VERB_CHARS)):
+                and not any(v in cand for v in _STRICT_VERB_CHARS)
+                and cand[-1] not in _ACTION_EDGE_REJECT):
             return cand
     return None
 
 
-def _tag_after_quote(text, close_idx):
+def _known_or_surnamed(cand, registry=None):
+    """新人名必须有姓氏背书；已登记过的名字（含诺诺这类无姓昵称）
+    与叠字/女性字昵称放行。registry 为 None 时按姓氏要求。
+
+    称谓词（老太太/王大爷/佟姨…）本身就是书中身份，直接放行 ——
+    它们在 _HINT_WORDS 里，不会被黑名单误杀。
+    """
+    if registry is None:
+        return cand[0] in _SURNAMES or cand in _HINT_WORDS
+    if cand in registry.gender_votes:
+        return True
+    if cand[0] in _SURNAMES or cand in _HINT_WORDS:
+        return True
+    # 无姓但形状像昵称：叠字名 / 女性字名（诺诺、小魔鬼里的魔鬼…）
+    if len(cand) == 2 and cand[0] == cand[1]:
+        return True
+    if any(ch in _FEMALE_NAME_CHARS for ch in cand):
+        return True
+    return False
+
+
+def _tag_after_quote(text, close_idx, registry=None):
     """在引号后的窗口里找「人名/代词 + 动词」（如：……。」夏弥说）。"""
     window = text[close_idx + 1:close_idx + 16]
     m = _VERB_RE.search(window)
@@ -423,7 +454,8 @@ def _tag_after_quote(text, close_idx):
         if _is_plausible_name(cand) and not any(
                 v in cand for v in _STRICT_VERB_CHARS):
             if _covered_by_modifiers(rest):
-                return cand
+                if _known_or_surnamed(cand, registry):
+                    return cand
     return None
 
 
@@ -673,9 +705,9 @@ def _process_paragraph(pi, para, registry, stack, speakers, light=False):
             touched.append(act)
             if not light:
                 registry.confirm(act)
-        token = _tag_before_quote(para, o)
+        token = _tag_before_quote(para, o, registry)
         if token is None:
-            token = _tag_after_quote(para, c)
+            token = _tag_after_quote(para, c, registry)
         spk = _apply_tag(token, registry, stack)
         if spk is not None:
             touched.append(spk)

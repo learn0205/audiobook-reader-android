@@ -1215,8 +1215,10 @@ class AudioBookApp(App, WakelockFgMixin):
     def _apply_ai_result(self, characters, result):
         """主线程：把 AI 判断的门类写进本书角色映射（保留自定义音色）。"""
         try:
-            detected = ai_roles.merge_detected(characters, result)
-            self._role_detected = [(n, c) for n, c in detected]
+            # AI 是清洗者：只保留模型确认为真实人物的候选（非人名碎片
+            # 被剔除、切错的名字被修正），未确认的候选全部剔除
+            detected = [(n, c) for n, c in result.items() if c]
+            self._role_detected = list(detected)
             rm = role_config.auto_map(self._book_key, detected,
                                       self._voice_template)
             # 已有自定义音色的人物不跟随新映射
@@ -1231,9 +1233,9 @@ class AudioBookApp(App, WakelockFgMixin):
             role_config.save_map(self.user_data_dir, rm)
             if self._multi_role_enabled():
                 self._engine.set_voice_resolver(self._role_voice_resolver)
-            ai_cnt = sum(1 for n, _c in detected if n in result)
-            self._toast("AI 识别完成：判定了 %d/%d 个角色，多角色配音已重排"
-                        % (ai_cnt, len(detected)))
+            dropped = len(characters) - len(detected)
+            self._toast("AI 识别完成：确认 %d 个真实角色（剔除 %d 个误报），"
+                        "多角色配音已重排" % (len(detected), max(0, dropped)))
         except Exception as err:
             self._on_error("AI 结果应用失败：%s" % err)
 
