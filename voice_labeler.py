@@ -238,12 +238,15 @@ def parse_label_args(args):
     return {"gender": gender, "age": age or "青年", "note": note}
 
 
-HELP = """命令：
-  回车/n   下一个未标注        <编号>    播放并标注该音色
-  e <编号> m|f [1-4] [备注]    直接修改标注    d <编号>  删除标注
-  r <编号> 重播                L        列出全部已标注
-  F 男|女  按性别列出          S        统计
-  G        立即导出            q        保存退出"""
+HELP = """最简用法：输入 m 或 f —— 播放下一个未标注音色并立即标上性别
+  （可带年龄段：m 3 = 男·中年；f 2 = 女·青年；后面还能空格加备注）
+
+其他命令：
+  回车/n   下一个未标注（进入标注）    <编号>    播放并标注该音色
+  e <编号> m|f [1-4] [备注]  修改任意标注      d <编号>  删除标注
+  r <编号> 重播              L   列出全部已标注
+  F 男|女  按性别列出         S   统计
+  a        自动连续模式      G   立即导出      q  保存退出"""
 
 
 def main():
@@ -255,6 +258,7 @@ def main():
     model_dir = prepare_model(args)
     get_tts(model_dir)
     state = load_state()
+    last_sid = None                    # 最近一次播放的 sid（m/f 可直接补标）
     labeled, unlab, m, f = stats(state)
     print("已标 %d / 未标 %d（男 %d 女 %d）" % (labeled, unlab, m, f))
     print(HELP)
@@ -272,6 +276,34 @@ def main():
         cmd = parts[0].lower()
 
         try:
+            # ⭐ 最常用动作：裸 m/f = 播放下一个未标注音色并立即标性别
+            # （m 3 沉稳 = 男·中年·备注；对刚播过的未标注音色也生效）
+            if cmd in ("m", "f") and (len(parts) == 1 or
+                                      parts[1] in AGES or
+                                      parts[1] not in ("男", "女")):
+                sid = None
+                if last_sid is not None and str(last_sid) not in state:
+                    sid = last_sid            # 刚播放还没标的，优先补标
+                if sid is None:
+                    sid = next_unlabeled(state)
+                if sid is None:
+                    print("187 个全部标注完成！G 导出即可")
+                    continue
+                path = synth(sid, model_dir)
+                show(sid, state)
+                play(path)
+                entry = {"sid": sid,
+                         "gender": "男" if cmd == "m" else "女",
+                         "age": "青年", "note": ""}
+                if len(parts) > 1 and parts[1] in AGES:
+                    entry["age"] = AGES[parts[1]]
+                if len(parts) > 2:
+                    entry["note"] = " ".join(parts[2:])
+                state[str(sid)] = entry
+                save_state(state)
+                last_sid = sid
+                show(sid, state)
+                continue
             if cmd in ("n", "下一个"):
                 sid = next_unlabeled(state)
                 if sid is None:
@@ -280,6 +312,7 @@ def main():
                 path = synth(sid, model_dir)
                 show(sid, state)
                 play(path)
+                last_sid = sid
                 res = parse_label_args(parts[1:])
                 if res:
                     state[str(sid)] = {"sid": sid, **res}
@@ -311,6 +344,7 @@ def main():
                 path = synth(sid, model_dir)
                 show(sid, state)
                 play(path)
+                last_sid = sid
                 res = parse_label_args(parts[1:])
                 if res:
                     state[str(sid)] = {"sid": sid, **res}
@@ -347,6 +381,7 @@ def main():
                 print(HELP)
             elif cmd in ("q", "quit", "exit"):
                 save_state(state)
+                export_app_labels(state)
                 break
             else:
                 print("未知命令，h 查看帮助")
