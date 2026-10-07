@@ -6,7 +6,7 @@
      连续引号对话沿用栈顶 / 纯旁白不动栈 / 性别年龄归类；
   2. voice_template：加载/修改/恢复默认，模板修改全局生效；
   3. role_config：单书映射读写隔离、自定义覆盖、一键重置、删除；
-  4. tts_engine.EdgeTTS：逐句音色钩子（含解析失败降级）与缓存键隔离；
+  4. tts_engine.LocalTTS：逐句音色钩子（含解析失败降级）与缓存键隔离；
   5. main 接入层可编译（py_compile 级别）。
 运行：python _test_roles.py
 """
@@ -38,7 +38,7 @@ def section(title):
 # ---------------------------------------------------------------------------
 def test_role_parser():
     import role_parser as rp
-    from role_parser import analyze
+    from role_parser import analyze, analyze_full
     from tts_android import split_sentences
     # 小样本语料达不到真书的频率门槛，测试时放宽到 2
     rp.MIN_SPEAKER_MENTIONS = 2
@@ -145,6 +145,52 @@ def test_role_parser():
     _c2, s2 = analyze(p2)
     check("引号后置「XX喊道」识别", spk(s2, 0, p2[0]) == "路明非", str(s2))
 
+    # 引号后置动作短语标签（真书高频、旧版全部漏判 → 台词归错人）
+    p7 = [
+        "「师兄你终于来了。」芬格尔从一堆报纸后面探出头。",
+        "「狮心会的选拔提前了。」芬格尔压低声音说。",
+        "「当然，你是S级。」芬格尔点点头。",
+        "「今年的新人很有意思。」昂热说道。",
+        "「师弟，紧张吗？」楚子航忽然开口。",
+        "「你又在偷懒。」夏弥瞥了他一眼。",
+        "「走吧。」芬格尔把门带上。",
+    ]
+    c7, s7 = analyze(p7)
+    n7 = [n for n, _ in c7]
+    check("后置动作句标签识别出芬格尔", "芬格尔" in n7, str(c7))
+    check("「压低声音说」归属芬格尔",
+          spk(s7, 1, p7[1]) == "芬格尔", str(s7))
+    check("「从一堆报纸后面探出头」归属芬格尔",
+          spk(s7, 0, p7[0]) == "芬格尔", str(s7))
+    check("「点点头」归属芬格尔", spk(s7, 2, p7[2]) == "芬格尔", str(s7))
+    check("「昂热说道」归属昂热（新人名放宽档）",
+          spk(s7, 3, p7[3]) == "昂热", str(s7))
+    check("「忽然开口」归属楚子航", spk(s7, 4, p7[4]) == "楚子航", str(s7))
+    check("「瞥了他一眼」归属夏弥", spk(s7, 5, p7[5]) == "夏弥", str(s7))
+    check("「把门带上」归属芬格尔（边界字启发）",
+          spk(s7, 6, p7[6]) == "芬格尔", str(s7))
+    # 只出场一次的昂热不进角色清单（门槛），但必须进候选池（AI 甄别）
+    check("未达门槛者不进角色清单", "昂热" not in n7, str(c7))
+    # 放宽档的负例：介词/时间短语开头不能当人名
+    p8 = [
+        "「……」到时候再说。",
+        "「……」这样的话谁能接。",
+        "「……」突然想起一件事。",
+    ]
+    _c8, s8 = analyze(p8)
+    check("「到时候再说」不产生说话人", spk(s8, 0, p8[0]) is None, str(s8))
+    check("「这样的话」不产生说话人", spk(s8, 1, p8[1]) is None, str(s8))
+    check("「突然想起」不产生说话人", spk(s8, 2, p8[2]) is None, str(s8))
+
+    # analyze_full：完整候选池（含未达门槛者 + 上下文样本）
+    chars_f, speakers_f, pool = analyze_full(p7)
+    pool_names = [x[0] for x in pool]
+    check("候选池包含全部登记人物", "昂热" in pool_names, str(pool_names))
+    check("候选池条目带上下文样本", all(len(x[3]) >= 1 for x in pool),
+          str(pool))
+    check("analyze() 与 analyze_full() 前两项一致",
+          chars_f == c7 and speakers_f == s7)
+
     # 旁白在前、对话在后（动作句入栈生效）
     p3 = [
         "夏弥想了想。",
@@ -174,7 +220,7 @@ def test_voice_template():
         p = t.get("男角色1")
         check("男角色1 默认音色", p["voice"] == "vits:auto:M1", str(p))
 
-        # Edge 音色名会被自动迁移回 auto 令牌 → 落盘验证用 VITS 音色
+        # 旧版 Edge 音色名会被自动迁移回 auto 令牌 → 落盘验证用 VITS 音色
         t.set_slot("男角色1", "vits:12", -12, 1.1)
         t2 = VoiceTemplate(tmp)          # 重新加载验证落盘
         check("修改后落盘", t2.get("男角色1")["voice"] == "vits:12")
@@ -191,6 +237,15 @@ def test_voice_template():
         check("类别耗尽返回 None",
               t3.next_free_slot("奶奶", {("奶奶%d" % i) for i in range(1, 5)})
               is None)
+
+        # 旁白专用编号：存在、默认音色独立、不参与自动分配
+        check("模板包含旁白编号", t3.get("旁白") is not None)
+        check("旁白默认音色与男角色1不同",
+              t3.get("旁白")["voice"] != t3.get("男角色1")["voice"])
+        check("旁白不参与自动分配",
+              t3.next_free_slot("旁白", set()) is None)
+        from voice_template import slot_category
+        check("旁白不属于任何角色类别", slot_category("旁白") is None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -259,12 +314,12 @@ def test_role_config():
 
 # ---------------------------------------------------------------------------
 def test_engine_resolver():
-    from tts_engine import LocalTTS as EdgeTTS
+    from tts_engine import LocalTTS
     from tts_android import STATE_STOPPED
 
     section("LocalTTS 逐句音色钩子（与 role_parser 联动）")
     from role_parser import analyze
-    e = EdgeTTS()
+    e = LocalTTS()
     e.set_voice("zh-CN-XiaoxiaoNeural")
     e.set_speed(1.0)
     e.set_pitch(0)
@@ -319,6 +374,45 @@ def test_engine_resolver():
     check("状态机不受影响", e.get_state() == STATE_STOPPED)
 
 
+def test_ai_parse():
+    import ai_roles
+
+    section("ai_roles.parse_output 名字对齐与修正接受")
+
+    characters = [("路明非", "男角色", ["他说……"]),
+                  ("夏弥", "女角色", ["……"]),
+                  ("恺撒", "男角色", [])]
+    # 精确匹配 + 同字重排修正 + 包含匹配 + 陌生名拒绝
+    text = ('[{"name":"夏弥","gender":"女","age":"青年"},'
+            '{"name":"路非明","gender":"男","age":"青年"},'
+            '{"name":"恺撒·加利亚","gender":"男","age":"青年"},'
+            '{"name":"完全陌生","gender":"男","age":"青年"}]')
+    result = ai_roles.parse_output(text, characters)
+    check("精确匹配", result.get("夏弥") == "女角色", str(result))
+    check("同字重排修正（路非明→路明非）",
+          result.get("路明非") == "男角色", str(result))
+    check("包含匹配（恺撒·加利亚→恺撒）",
+          result.get("恺撒") == "男角色", str(result))
+    check("完全陌生的名字被拒绝（防幻觉）",
+          "完全陌生" not in result and "完全陌生" not in
+          [c[0] for c in characters])
+
+    # 同字重排不得误配不同字集的候选
+    text2 = '[{"name":"路明","gender":"男","age":"青年"}]'
+    result2 = ai_roles.parse_output(text2, characters)
+    check("子串包含回写候选名", result2.get("路明非") == "男角色",
+          str(result2))
+
+    # 兜底正则路径 + 全失败抛 AIError
+    result3 = ai_roles.parse_output("夏弥：女，青年。", characters)
+    check("兜底正则路径可用", result3.get("夏弥") == "女角色", str(result3))
+    try:
+        ai_roles.parse_output("模型输出跑飞了没有任何结构", characters)
+        check("完全无法解析抛 AIError", False)
+    except ai_roles.AIError:
+        check("完全无法解析抛 AIError", True)
+
+
 def test_compile_all():
     section("全部源码可编译")
     import py_compile
@@ -338,6 +432,7 @@ if __name__ == "__main__":
         test_voice_template()
         test_role_config()
         test_engine_resolver()
+        test_ai_parse()
         test_compile_all()
     except Exception:
         traceback.print_exc()

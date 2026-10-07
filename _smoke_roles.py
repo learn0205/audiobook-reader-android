@@ -120,14 +120,24 @@ def main_run():
     app._role_speakers = {(0, "「你好。"): "楚子航"}
     app._engine.set_voice_resolver(app._role_voice_resolver)
     try:
-        app._engine.load(app._paragraphs)   # 让 Edge 后端有句子可查
-        edge = app._engine._ensure_local()
-        params = edge._voice_params_for(0)
+        app._engine.load(app._paragraphs)   # 让本地后端有句子可查
+        local = app._engine._ensure_local()
+        params = local._voice_params_for(0)
         # 楚子航绑定男角色1；第 6 步已把该编号改成云健
         check("逐句解析出角色参数", params[0] == "zh-CN-YunjianNeural",
               str(params))
     except Exception as e:
         check("逐句解析出角色参数", False, str(e))
+
+    # 10) 无说话人的句子（旁白/叙述）用模板「旁白」编号，不与角色同声
+    try:
+        app._role_speakers = {}
+        local = app._engine._ensure_local()
+        params = local._voice_params_for(0)
+        want = app._voice_template.get("旁白")["voice"]
+        check("旁白句用旁白音色", params[0] == want, str(params))
+    except Exception as e:
+        check("旁白句用旁白音色", False, str(e))
 
     # 清理测试数据
     role_config.delete_map(data_dir, fake_key)

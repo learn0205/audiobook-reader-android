@@ -3,8 +3,8 @@
 
 为什么需要这一层？
   原 app 只有一个「系统原生 TTS」引擎（tts_android.AndroidTTS），main.py 直接持有它。
-  现在接入微软 Edge 在线 TTS（免费、无需密钥、约 14 个中文神经音色），但 Edge 的
-  播放方式和系统 TTS 完全不同（先合成 mp3 文件 → 用 MediaPlayer 播放 → 播完再读下一句），
+  现在主音源是本地离线 VITS（vits_tts，sherpa-onnx，187 音色），但它的
+  播放方式和系统 TTS 完全不同（先合成 wav 文件 → 用 MediaPlayer 播放 → 播完再读下一句），
   无法直接塞进 AndroidTTS。于是这里做一层路由器：
 
     ReaderTTS（本模块）
@@ -12,11 +12,11 @@
       └── _local   : LocalTTS     （本地离线合成，懒加载）
 
   main.py 仍然只持有唯一的 self._engine（即 ReaderTTS），调用接口与 AndroidTTS 完全一致，
-  路由器根据当前所选音色的「来源」自动在 two 后端之间切换，并对 main.py 透明。
+  路由器根据当前所选音色的「来源」自动在两个后端之间切换，并对 main.py 透明。
 
 LocalTTS 后端（LocalTTS 类）要点：
   · 合成走 vits_tts（sherpa-onnx VITS，完全离线，无任何网络请求）；
-  · 合成是阻塞网络 IO，放子线程；合成完回到主线程用 android.media.MediaPlayer 播放；
+  · 合成是阻塞 CPU/IO，放子线程；合成完回到主线程用 android.media.MediaPlayer 播放；
   · 播放推进用轮询 MediaPlayer.isPlaying() 兜底（与系统引擎一样，vivo 的回调不可靠）；
   · 全部 jnius / MediaPlayer 调用都做桌面环境降级，桌面可 import、可跑逻辑测试。
 """
@@ -94,8 +94,8 @@ def _post_to_main(fn):
     """把 fn 投递到「安卓主线程」执行。
 
     ⚠️ 关键：不能只用 Kivy 的 `Clock.schedule_once`——**熄屏后 Kivy 的逐帧时钟停摆**，
-    Clock 里的回调永远不会触发。Edge 后端「合成完 → 用 MediaPlayer 播放」这一步
-    原来走的是 Clock，于是熄屏后 Edge 音色会卡住不动。改用主线程 Handler，
+    Clock 里的回调永远不会触发。本地后端「合成完 → 用 MediaPlayer 播放」这一步
+    原来走的是 Clock，于是熄屏后会卡住不动。改用主线程 Handler，
     熄屏也能照常播放（与主程序 _tick 的做法一致）。
     """
     if _JNIUS_OK:
@@ -112,17 +112,17 @@ def _post_to_main(fn):
     #    那是从合成子线程往 Kivy 的 Clock 塞事件，而 Clock **不是线程安全的** ——
     #    子线程塞事件和主线程 tick() 撞上时，回调整条会被丢掉。桌面端平时看不出来，
     #    但「合成完 → 起播」和「起播前预取下一句」都走这条投递，丢了就等于预取
-    #    永远不触发（CI 上的表现：`edge: 播放期间预取生效 early=1` 偶发失败）。
+    #    永远不触发（CI 上的表现：`播放期间预取生效 early=1` 偶发失败）。
     #    桌面没有安卓主线程约束，直接同步调用即可（_play_file / _on_synth_error
     #    都不碰图形指令），结果完全确定。
     fn()
 
 
 # ============================================================================
-#  Edge 在线 TTS 后端
+#  本地离线 TTS（VITS）后端
 # ============================================================================
 class LocalTTS:
-    """Edge 在线语音引擎：逐句合成 mp3 → MediaPlayer 播放 → 播完推进下一句。
+    """本地离线语音引擎：逐句合成 wav → MediaPlayer 播放 → 播完推进下一句。
 
     公开方法与 AndroidTTS 完全一致（main.py / ReaderTTS 都按这个接口调用）。
     """
@@ -183,7 +183,7 @@ class LocalTTS:
         self._pos_frozen = 0         # 媒体位置连续没变化的 tick 数（判「播完」用）
         self._last_player_step = ""  # 起播失败时卡在哪一步（错误信息里带上）
         self._prefetch_inflight = set()   # 预取中的缓存键（去重，防止同句并发合成）
-        self._ready = True           # Edge 不需要离线初始化，构造即可用
+        self._ready = True           # 本地引擎不需要离线初始化，构造即可用
         self._init_error = ""
         self._user_data_dir = ""     # 由 _set_cache_dir 传入（缓存目录）
 
@@ -199,10 +199,10 @@ class LocalTTS:
         return self._state
 
     def is_busy(self):
-        """是否在后台合成当前句（网络 IO 进行中）。
+        """是否在后台合成当前句（合成进行中）。
 
         卡死自检靠它区分两类「位置不动」：
-          · True  → 正在等 Edge 返回 mp3（慢网络/抖动），是正常等待，不该判卡死；
+          · True  → 正在等 VITS 合成完（长句/低端机较慢），是正常等待，不该判卡死；
           · False → 既没在合成也没在播，位置还不动 → 才是真卡死，应自动暂停恢复。
         """
         return bool(self._synthesizing)
@@ -263,7 +263,7 @@ class LocalTTS:
 
         ⚠️ 顺手删掉这一句的缓存文件：命中缓存就**跳过合成**，如果那份 mp3
         本身是坏的（截断 / 只有几字节 / 静音），重开多少次都还是同一份坏文件
-        —— 表现就是「卡在某一句上永远念不出声」，删掉后这次会重新联网合成。
+        —— 表现就是「卡在某一句上永远念不出声」，删掉后这次会重新合成。
         """
         if self._state != STATE_PLAYING:
             return
@@ -303,7 +303,7 @@ class LocalTTS:
         return self._cps
 
     def get_voices(self):
-        """返回 Edge 音色列表（含 source 标记），由 ReaderTTS 负责与系统音色合并。"""
+        """返回本地音色列表（含 source 标记），由 ReaderTTS 负责与系统音色合并。"""
         # 真正的列表在 ReaderTTS 层合并（本地 VITS 音色）。
         # 这里只返回「已选音色名」，合并逻辑在 Router 层。
         return []
@@ -567,28 +567,28 @@ class LocalTTS:
         self._sent_started = time.time()
         gen = self._generation
 
-        # 合成在子线程做（网络 IO），完成后再回主线程播放。
+        # 合成在子线程做（本地推理），完成后再回主线程播放。
         # ⚠️ 这里必须传**原始句子字符串**：_synthesize_and_play 内部会调
         # _synth_text_for(sentence) 做换算。之前误传了 self._synth_text_for(sentence)
         # 的**返回值（元组）**，于是子线程里又换算一次 → text 变成嵌套元组
         # → 合成入口拿到元组再转义时抛
         #   "'tuple' object has no attribute 'replace'"
-        # → 表现为「选中 Edge 音色提示合成失败」，而且**所有 Edge 音色都失败**。
+        # → 表现为「选中本地音色提示合成失败」，而且**所有本地音色都失败**。
         args = (self._index, sentence, gen)
         self._synth_thread = threading.Thread(
             target=self._synthesize_and_play, args=args, daemon=True)
         self._synth_thread.start()
-        # 提前预取：当前句还没合成就先在后台合成后面几句（各自独立连接并行），
+        # 提前预取：当前句还没合成就先在后台合成后面几句（各自独立线程并行），
         # 比「等本句开始播放才预取」早了一个合成周期，避免短句快播时下一句来不及
-        # 合成而现场等待——这是 Edge 在线语音「偶尔较长间隔」的主要原因。
+        # 合成而现场等待。
         # 用 self._index（当前句）作基准；generation 变化会自行停止旧的预取。
         threading.Thread(target=self._prefetch_ahead,
                          args=(self._index, gen), daemon=True).start()
 
     def _synth_params(self):
-        """把 app 的 speed/pitch 档位换算成 Edge 的 rate/pitch/volume 字符串。"""
-        # Edge rate 范围约 -50%~+100%；pitch 档位 -10~+10 映射到 ±50Hz
-        # （Edge 支持约 ±100Hz，取一半更自然、不刺耳）
+        """把 app 的 speed/pitch 档位换算成合成入口的 rate/pitch/volume 字符串。"""
+        # rate 范围约 -50%~+100%；pitch 档位 -10~+10 映射到 ±50Hz
+        # （VITS 忽略 pitch 字段，保留换算以兼容自定义参数显示）
         rate = "%+d%%" % round((self._speed - 1.0) * 100)
         pitch = "%+dHz" % (self._pitch * 5)
         volume = "+0%"
@@ -646,7 +646,7 @@ class LocalTTS:
             if generation != self._generation:
                 return
             self._error_count += 1
-            self.on_error("Edge 合成失败：%s" % e)
+            self.on_error("本地合成失败：%s" % e)
             _post_to_main(lambda: self._on_synth_error(generation))
 
     def _on_synth_error(self, generation):
@@ -729,7 +729,7 @@ class LocalTTS:
         except Exception as e2:
             self._synthesizing = False
             self._spoken_uid = None
-            self.on_error("Edge 播放失败(%s→重试也失败)：%s" % (_step, e2))
+            self.on_error("本地播放失败(%s→重试也失败)：%s" % (_step, e2))
             self._advance()
 
     def _prune_cache(self, keep_path=None):
@@ -784,10 +784,9 @@ class LocalTTS:
     def _prefetch_ahead(self, sent_index, generation):
         """当前句还在合成/播放时，后台并行预合成后面的若干句。
 
-        Edge 是逐句合成 mp3：以前播完本句才发现下一句要**现合成**，
-        一次网络往返（握手 + 合成 0.5~3s）全部变成了停顿 —— 这就是
-        「Edge 在线语音偶尔较长间隔」的大头。预取命中后推进直接播本地
-        缓存 mp3，完全不走网络、无握手开销，间隔即消失。
+        逐句合成模式下，以前播完本句才发现下一句要**现合成**，
+        一次推理（0.2~3s）全部变成了停顿。预取命中后推进直接播本地
+        缓存 wav，无需等待，间隔即消失。
 
         改进点（与早期版本相比）：
           · 触发时机提前到 _speak_current（当前句一开始合成就并行预取），
@@ -796,7 +795,7 @@ class LocalTTS:
             避免「+1 慢 → +2/+3 全被拖慢」；
           · 单句失败只放弃该句（不再整批 return），其他句照常预取。
 
-        任何异常都直接放弃该句（网络抖动不该刷屏，推进时还有兜底合成）。
+        任何异常都直接放弃该句（不该刷屏，推进时还有兜底合成）。
         """
         if not (self._cache_dir and self._voice_name):
             return
@@ -908,7 +907,7 @@ class LocalTTS:
 #  统一路由器：对 main.py 暴露与 AndroidTTS 完全一致的接口
 # ============================================================================
 class ReaderTTS:
-    """把「系统 TTS」和「Edge 在线 TTS」合并成一个引擎，对 main.py 透明。
+    """把「系统 TTS」和「本地离线 VITS」合并成一个引擎，对 main.py 透明。
 
     调用方（main.py）只感知一个 ReaderTTS，方法签名与 AndroidTTS 一致。
     内部根据当前所选音色的来源，把请求转发给 _android 或 _local 后端。
@@ -941,9 +940,9 @@ class ReaderTTS:
         self._position = (0, 0)           # (段落, 字符) 切换后端时用于恢复
         self._voice_name = ""
         self._voice_source = "android"
-        # 多角色逐句音色解析器（main.py 注入；仅 Edge 后端支持多角色）
+        # 多角色逐句音色解析器（main.py 注入；仅本地 VITS 后端支持多角色）
         self._voice_resolver = None
-        self._local_voices = []             # Edge 音色缓存（网络拉取后填充）
+        self._local_voices = []             # 本地 VITS 音色缓存（模型导入后填充）
         self._merged_voices = []           # 合并后的音色列表（供 UI）
 
     # ---- 引擎代理：把 on_voices 收口，合并后再上报给 main.py ----
@@ -965,16 +964,16 @@ class ReaderTTS:
                   for v in sys_voices]
         # 统一过滤：普通话中文 + 英文（系统引擎里的粤语/其他语言剔除）
         tagged = [v for v in tagged if self._mandarin_or_english(v)]
-        edge_voices = self._local_voices
+        local_voices = self._local_voices
         # 系统音色在前、本地离线音色在后
-        merged = tagged + edge_voices
+        merged = tagged + local_voices
         self._merged_voices = merged
         self.on_voices(merged)
 
     # ==================== 生命周期 ====================
     def start(self):
         self._android.start()
-        # Edge 音色是网络拉取，后台异步获取，拿到后合并进列表
+        # 本地音色列表后台构建（模型导入后可用；无网络请求）
         threading.Thread(target=self._build_local_voices, daemon=True).start()
 
     def _build_local_voices(self):
@@ -1002,7 +1001,7 @@ class ReaderTTS:
         self._build_local_voices()
 
     def is_ready(self):
-        # 当前活跃后端是否就绪；系统引擎初始化较慢，Edge 始终就绪
+        # 当前活跃后端是否就绪；系统引擎初始化较慢，本地引擎始终就绪
         if self._active == "local":
             return True
         return self._android.is_ready()
@@ -1156,14 +1155,14 @@ class ReaderTTS:
         for v in self._merged_voices:
             if v.get("name") == name:
                 return v.get("source")
-        # 没在列表里（例如启动时还没拉到 Edge 列表）时，用默认 android
+        # 没在列表里（例如启动时还没构建本地音色列表）时，用默认 android
         return self._active
 
     def _switch_backend(self, target):
-        """切换后端（系统引擎 ↔ Edge），并把进度原样搬过去。
+        """切换后端（系统引擎 ↔ 本地离线），并把进度原样搬过去。
 
         ⚠️ 切换前必须把**旧后端真正停掉**：以前只换指针就直接起播新后端，于是
-        「系统引擎还在念这一句、Edge 又从同一起点念一遍」—— 用户听到**两个
+        「系统引擎还在念这一句、本地引擎又从同一起点念一遍」—— 用户听到**两个
         声音同时读小说**。
 
         ⚠️ 停旧后端时要**临时摘掉它的 on_state**：`stop()` 会广播 STOPPED，

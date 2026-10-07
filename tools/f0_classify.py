@@ -90,6 +90,60 @@ def classify(m):
     return g, age, conf
 
 
+def build_template(detail):
+    """按基频排序构建初始音色模板（手机端一次导入即生效）。
+
+    男声按 F0 升序：最低沉 4 个 → 中年叔叔1..4，其次 8 个 → 男角色1..8；
+    女声分三段：最高 2 个 → 童声1..2，其后 4 个 → 少女1..4，中段 8 个 →
+    女角色1..8，最低沉 4 个 → 奶奶1..4；
+    旁白取分配完后剩余的中段男声（不与任何已分配音色重复，语速略缓）。
+    声部人数不足时跳过对应编号，绝不重复占用同一音色。
+    """
+    males = sorted([(d["sid"], d["f0"]) for d in detail
+                    if d["gender"] == "男"], key=lambda x: x[1])
+    females = sorted([(d["sid"], d["f0"]) for d in detail
+                      if d["gender"] == "女"], key=lambda x: -x[1])
+    out = {}
+    used = set()
+
+    def assign(slots, pool):
+        """按顺序给 slots 分配 pool 里未占用的 sid（池子用尽即止）。"""
+        pi = 0
+        for slot in slots:
+            while pi < len(pool) and pool[pi] in used:
+                pi += 1
+            if pi >= len(pool):
+                return
+            out[slot] = {"voice": "vits:%d" % pool[pi],
+                         "pitch": 0, "rate": 1.0}
+            used.add(pool[pi])
+            pi += 1
+
+    m_asc = [s for s, _f0 in males]
+    f_desc = [s for s, _f0 in females]
+    assign(["中年叔叔%d" % i for i in range(1, 5)]
+           + ["男角色%d" % i for i in range(1, 9)], m_asc)
+    assign(["童声%d" % i for i in range(1, 3)]
+           + ["少女%d" % i for i in range(1, 5)], f_desc)
+    assign(["女角色%d" % i for i in range(1, 9)], f_desc[len(f_desc) // 3:])
+    assign(["奶奶%d" % i for i in range(1, 5)], list(reversed(f_desc)))
+    # 旁白：剩余中段男声；男声全用尽 → 最低女声兜底
+    rest_m = [s for s in m_asc if s not in used]
+    if rest_m:
+        assign(["旁白"], [rest_m[len(rest_m) // 2]])
+    elif f_desc:
+        assign(["旁白"], [f_desc[-1]])
+    # 语速沿用出厂默认（中年/长辈慢、童声快、旁白略缓）
+    rates = {"中年叔叔": 0.95, "奶奶": 0.9, "童声": 1.1, "少女": 1.05,
+             "旁白": 0.97}
+    for slot, params in out.items():
+        for prefix, r in rates.items():
+            if slot.startswith(prefix):
+                params["rate"] = r
+                break
+    return out
+
+
 def main():
     out_rows = []
     for sid in range(187):
@@ -121,7 +175,7 @@ def main():
               % (sid, sid + 1, m, row[3], row[4]))
     if unknown:
         print("\n无法分析：", unknown)
-    # 产出：自动标注 labels（性别）+ 全量表
+    # 产出：性别标注 + 初始音色模板 + 全量表（手机端一次导入三样全齐）
     labels = {}
     detail = []
     for sid, m, g, age, conf, n in out_rows:
@@ -129,10 +183,17 @@ def main():
             labels[str(sid)] = g
             detail.append({"sid": sid, "f0": round(m or 0), "gender": g,
                            "age": age, "confidence": conf})
-    json.dump({"voice_labels": labels, "detail": detail},
+    payload = {"voice_labels": labels,
+               "voice_template": build_template(detail),
+               "detail": detail}
+    json.dump(payload,
               open(os.path.join(FOLDER, "自动识别结果.json"), "w",
                    encoding="utf-8"), ensure_ascii=False, indent=1)
-    print("\n已生成：%s\\自动识别结果.json（labels + 全量明细）" % FOLDER)
+    print("\n已生成：%s\\自动识别结果.json（labels + 初始模板 + 全量明细）"
+          % FOLDER)
+    tpl = payload["voice_template"]
+    print("初始模板 %d 个编号已按基频排序分配（旁白=%s）"
+          % (len(tpl), tpl.get("旁白", {}).get("voice", "未分配")))
 
 
 if __name__ == "__main__":

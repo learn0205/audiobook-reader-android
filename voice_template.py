@@ -6,6 +6,7 @@
 · 模板是**全局唯一**的：所有小说共用同一套「编号角色清单」，
   每个编号绑定一个本地 VITS 音色（vits:auto 令牌 = 第 N 个被用户
   标注为男/女的音色；未标注时用内置分散预设，标完即全员生效）。
+  「旁白」编号不参与自动分配，专用于叙述行的声音。
 · 单本小说只保存「人名 ↔ 编号」的映射（见 role_config.py），
   **不**重复保存音色参数 —— 人名的声音参数永远按编号从本模板现查。
   所以模板一改，所有绑定该编号的人物立即同步换声音；
@@ -14,7 +15,7 @@
 · 模板持久化到应用私有目录 voice_template.json；文件缺失/损坏时
   回退到内置默认清单（内置清单即出厂状态，「恢复默认」也回到它）。
 
-音调/语速的单位与 Edge 对齐：
+音调/语速的单位：
   · pitch 保留字段但 VITS 忽略；
   · rate 用倍率（1.0 = 正常），由合成引擎按 speed 换算。
 """
@@ -26,7 +27,7 @@ import threading
 # ---------------------------------------------------------------------------
 # 内置默认清单（出厂模板）。可分配的编号按「类别 + 序号」命名：
 #   男角色1..8、中年叔叔1..4、女角色1..8、奶奶1..4
-# 每类内的多个编号用不同的 Edge 音色/音调区分开，避免一本书里
+# 每类内的多个编号用不同的 VITS 音色/语速区分开，避免一本书里
 # 两个角色完全同声。
 # ---------------------------------------------------------------------------
 DEFAULT_SLOTS = {
@@ -66,64 +67,15 @@ DEFAULT_SLOTS = {
     "少女2": {"voice": "vits:auto:F16", "pitch": 0, "rate": 1.0},
     "少女3": {"voice": "vits:auto:F17", "pitch": 0, "rate": 1.08},
     "少女4": {"voice": "vits:auto:F18", "pitch": 0, "rate": 0.95},
+    # ---- 旁白（叙述行专用，与所有角色音色区分开）----
+    # 多角色朗读开启时，没有说话人的句子（旁白/未标注叙述）用这个编号；
+    # 默认选低沉男声且不在自动映射的编号里（M1~M12 依次分给男角色），
+    # 避免旁白和主角同声。用户可在「音色模板」里随时改。
+    "旁白": {"voice": "vits:auto:M20", "pitch": 0, "rate": 0.97},
 }
 
 # 类别名 → 该类的编号清单（保持声明顺序，自动映射时按序取用）
 CATEGORY_ORDER = ("男角色", "中年叔叔", "女角色", "奶奶", "童声", "少女")
-
-# 常见 Edge 中文音色的短名（FriendlyName 太长，界面上显示短名更好认）
-VOICE_FRIENDLY = {
-    "zh-CN-XiaoxiaoNeural": "晓晓",
-    "zh-CN-XiaoyiNeural": "晓伊",
-    "zh-CN-XiaoyanNeural": "晓颜",
-    "zh-CN-XiaoyouNeural": "晓悠",
-    "zh-CN-XiaoyuNeural": "晓宇",
-    "zh-CN-XiaozhenNeural": "晓甄",
-    "zh-CN-XiaohanNeural": "晓涵",
-    "zh-CN-XiaomengNeural": "晓梦",
-    "zh-CN-XiaomoNeural": "晓墨",
-    "zh-CN-XiaoqiuNeural": "晓秋",
-    "zh-CN-XiaoruiNeural": "晓睿",
-    "zh-CN-XiaoshuangNeural": "晓双",
-    "zh-CN-XiaoxuanNeural": "晓萱",
-    "zh-CN-XiaochenNeural": "晓辰",
-    "zh-CN-XiaoniNeural": "晓妮",
-    "zh-CN-XiaobeiNeural": "晓北",
-    "zh-CN-YunxiNeural": "云希",
-    "zh-CN-YunyangNeural": "云扬",
-    "zh-CN-YunjianNeural": "云健",
-    "zh-CN-YunyeNeural": "云野",
-    "zh-CN-YunhaoNeural": "云皓",
-    "zh-CN-YunzeNeural": "云泽",
-    "zh-CN-YunfeiNeural": "云飞",
-    "zh-CN-YunxiaNeural": "云夏",
-    "zh-CN-YunyiNeural": "云逸",
-    "zh-CN-YunfengNeural": "云枫",
-    "zh-CN-YunzhengNeural": "云正",
-    "zh-HK-HiuMaanNeural": "曉曼(粤)",
-    "zh-HK-WanLungNeural": "雲龍(粤)",
-    "zh-TW-HsiaoChenNeural": "曉臻(台)",
-    "zh-TW-YunJheNeural": "雲哲(台)",
-    "zh-TW-HsiaoYuNeural": "曉雨(台)",
-    "zh-HK-HiuGaaiNeural": "曉佳(粤)",
-    "zh-CN-liaoning-XiaobeiNeural": "晓北(东北)",
-    "zh-CN-shaanxi-XiaoniNeural": "晓妮(陕西)",
-    "en-US-JennyNeural": "Jenny(英)",
-    "en-US-AriaNeural": "Aria(英)",
-    "en-US-AnaNeural": "Ana(英)",
-    "en-US-AvaNeural": "Ava(英)",
-    "en-US-EmmaNeural": "Emma(英)",
-    "en-US-MichelleNeural": "Michelle(英)",
-    "en-US-GuyNeural": "Guy(英)",
-    "en-US-DavisNeural": "Davis(英)",
-    "en-US-AndrewNeural": "Andrew(英)",
-    "en-US-BrianNeural": "Brian(英)",
-    "en-US-EricNeural": "Eric(英)",
-    "en-US-RogerNeural": "Roger(英)",
-    "en-GB-SoniaNeural": "Sonia(英)",
-    "en-GB-LibbyNeural": "Libby(英)",
-    "en-GB-RyanNeural": "Ryan(英)",
-}
 
 
 def slot_ids():
@@ -132,7 +84,7 @@ def slot_ids():
 
 
 def slot_category(slot_id: str) -> str:
-    """「男角色3」→「男角色」；不认识的编号返回 None。"""
+    """「男角色3」→「男角色」；不认识的编号（含「旁白」）返回 None。"""
     if not slot_id:
         return None
     for cat in CATEGORY_ORDER:
@@ -142,7 +94,7 @@ def slot_category(slot_id: str) -> str:
 
 
 def voice_friendly(name: str) -> str:
-    """zh-CN-YunxiNeural → 云希；vits:N → 本地音色短名；未知原样返回。"""
+    """vits:auto → 自动男声N号；vits:N → 音色N号（性别标注）；未知原样返回。"""
     if isinstance(name, str) and name.startswith("vits:auto:"):
         tag = name.split(":", 2)[2]          # M1 / F12
         g = "男" if tag[:1] == "M" else "女"
@@ -163,7 +115,7 @@ def voice_friendly(name: str) -> str:
         except Exception:
             g = None
         return "音色%d号（%s）" % (sid + 1, g or "未标注")
-    return VOICE_FRIENDLY.get(name, name or "默认")
+    return name or "默认"
 
 
 class VoiceTemplate:

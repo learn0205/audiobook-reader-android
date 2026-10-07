@@ -4,11 +4,11 @@
 包含：
   1) 布局：正文区严格贴合顶栏下沿，保镖 fix 计数正常（_smoke 的检查）
   2) _v.py 的期望高度断言
-  3) Edge 后端：逐句推进 + 播放期间预取 + 全句缓存（假合成，无网络）
+  3) 本地后端：逐句推进 + 播放期间预取 + 全句缓存（假合成，无网络）
   4) ConfigManager 备份导出/导入
   5) 设置弹窗：文字不被裁切 + 深浅主题对比度达标（见 test_settings_popup）
   6) 「卡死自检」信号源：位置前进才算在出声 / 句中停住不切句 / 坏缓存能重开
-     （见 test_edge_progress_signal、test_edge_advance_not_cut）
+     （见 test_local_progress_signal、test_local_advance_not_cut）
   7) 外部播放/暂停命令按语义幂等执行，不再反转状态（见 test_media_cmd_semantics）
 """
 import os
@@ -80,7 +80,7 @@ def test_layout():
     app._stop_tick_loop()
 
 
-def test_edge_flow():
+def test_local_flow():
     import vits_tts
     import tts_engine
     from tts_android import STATE_STOPPED
@@ -125,17 +125,17 @@ def test_edge_flow():
             break
     cached = sum(1 for _, s in e._sentences
                  if os.path.exists(e._cache_path(s)))
-    check("edge: 播放期间预取生效", early >= 2, "early=%d" % early)
-    check("edge: 全部句子缓存并播完", cached == total and e._index >= total,
+    check("local: 播放期间预取生效", early >= 2, "early=%d" % early)
+    check("local: 全部句子缓存并播完", cached == total and e._index >= total,
           "cached=%d/%d" % (cached, total))
     e._stop_tick_loop() if hasattr(e, "_stop_tick_loop") else None
 
 
-def test_edge_prefetch_parallel():
+def test_local_prefetch_parallel():
     """预取逻辑回归：从当前句 n 触发预取，应并行合成后面 1/2/3 句（共 3 句），
     且**不**包含当前句本身；每句独立线程并行（不串行等上一句）。
 
-    这是「Edge 在线语音偶尔较长间隔」修复的核心：预取提前到当前句一开始合成就
+    这是「句间偶尔较长间隔」修复的核心：预取提前到当前句一开始合成就
     触发、深度 3、并行，使推进时后续句基本命中本地缓存、无现场合成停顿。"""
     import vits_tts
     import tts_engine
@@ -168,10 +168,10 @@ def test_edge_prefetch_parallel():
             break
         time.sleep(0.03)
     cached = sum(1 for _, s in e._sentences if os.path.exists(e._cache_path(s)))
-    check("edge: 预取并行写出后续3句(不含当前句)",
+    check("local: 预取并行写出后续3句(不含当前句)",
           cached == 3 and "当前句第零。" not in calls,
           "cached=%d calls=%s" % (cached, calls))
-    check("edge: 预取覆盖 index+1/+2/+3",
+    check("local: 预取覆盖 index+1/+2/+3",
           ("后续一。" in calls) and ("后续二。" in calls) and ("后续三。" in calls),
           "calls=%s" % calls)
 
@@ -505,7 +505,7 @@ def test_toc_follow():
         app._stop_tick_loop()
 
 
-def test_edge_progress_signal():
+def test_local_progress_signal():
     """卡死自检的两个信号源回归（桌面用假播放器，不需要安卓设备）。
 
     1. `media_position()` 判定「在出声」**不能只看 isPlaying()**：部分 ROM 在
@@ -562,22 +562,22 @@ def test_edge_progress_signal():
     e.media_position()
     e._player.pos = 300
     playing, pos = e.media_position()
-    check("edge: 位置前进即认定在出声(isPlaying 恒false也不误判)",
+    check("local: 位置前进即认定在出声(isPlaying 恒false也不误判)",
           playing and pos == 300, "playing=%s pos=%s" % (playing, pos))
-    check("edge: 位置在走 → 无进展计时归零",
+    check("local: 位置在走 → 无进展计时归零",
           e.progress_age() < 0.05, "age=%.3f" % e.progress_age())
 
     # 2) 位置冻结 + isPlaying() false → 判定「没出声」，但**位置照样原样返回**
     playing2, pos2 = e.media_position()
-    check("edge: 位置冻结时仍原样返回毫秒位置（不丢成 -1）",
+    check("local: 位置冻结时仍原样返回毫秒位置（不丢成 -1）",
           (not playing2) and pos2 == 300, "playing=%s pos=%s" % (playing2, pos2))
     time.sleep(0.25)
-    check("edge: 无声音进展计时会往上走（真卡死能检出）",
+    check("local: 无声音进展计时会往上走（真卡死能检出）",
           e.progress_age() >= 0.2, "age=%.3f" % e.progress_age())
 
     # 3) 合成中一律算「有进展」（弱网合成十几秒不能被当卡死）
     e._synthesizing = True
-    check("edge: 合成等待中不算卡死", e.progress_age() == 0.0,
+    check("local: 合成等待中不算卡死", e.progress_age() == 0.0,
           "age=%.3f" % e.progress_age())
 
     # 4) recover() 删掉当前句坏缓存 + 重启链路
@@ -603,7 +603,7 @@ def test_edge_progress_signal():
         now_content = open(bad, "rb").read() if os.path.exists(bad) else None
     except OSError:
         now_content = None
-    check("edge: recover 清掉当前句坏缓存并重开链路",
+    check("local: recover 清掉当前句坏缓存并重开链路",
           (now_content != b"BAD") and e._generation > gen,
           "content=%s gen=%d->%d" % (now_content, gen, e._generation))
 
@@ -611,11 +611,11 @@ def test_edge_progress_signal():
     e._index = 1
     e._speak_current = lambda: None      # 别真起合成线程（_advance 会调它）
     e.skip_current()
-    check("edge: skip_current 跳过当前句继续往下",
+    check("local: skip_current 跳过当前句继续往下",
           e._index >= 2, "index=%d" % e._index)
 
 
-def test_edge_advance_not_cut():
+def test_local_advance_not_cut():
     """「这句播完了没有」的判定回归 —— 别在 `isPlaying()` 恒 false 的机器上切句子。
 
     根因回顾：部分 ROM 在正常播 mp3 时 `isPlaying()` 恒为 false。旧逻辑一旦看到
@@ -717,7 +717,7 @@ def test_edge_advance_not_cut():
 
 
 def test_switch_backend_stops_old():
-    """切换音色（系统引擎 ↔ Edge）时，旧后端必须被**真正停掉**。
+    """切换音色（系统引擎 ↔ 本地离线）时，旧后端必须被**真正停掉**。
 
     曾经的 bug：`_switch_backend()` 只换指针就直接起播新后端，旧的系统引擎还
     在念那一句 —— 用户听到**两个声音同时读小说**。
@@ -746,7 +746,7 @@ def test_switch_backend_stops_old():
             self.played = []
             self.on_state = None
             self._para = 1
-            # _ensure_edge 会从 android 后端拷这些参数
+            # _ensure_local 会从 android 后端拷这些参数
             self._speed = 1.0
             self._pitch = 0
             self._intonation = True
@@ -892,10 +892,10 @@ def test_freeze_detect_and_keepalive():
         app._keepalive_prompted = True            # 后续测试不再弹
 
 
-def test_edge_play_retry():
+def test_local_play_retry():
     """起播失败要**自动重试一次**（全新播放器），并把失败步骤写进错误信息。
 
-    真机证据（用户截图）：`Edge 播放失败：JVM exception occured:
+    真机证据（用户截图）：`本地播放失败：JVM exception occured:
     java.lang.IllegalStateException … android.media.MediaPlayer` —— 只给这一条信息
     既分不清是 setDataSource 还是 start 出的问题，也看不出会不会自愈。
     现在：① 错误信息带步骤名；② 失败自动重开一次（被系统冻结打断后残留的异常
@@ -1151,14 +1151,14 @@ def test_media_cmd_semantics():
 
 
 def main_run():
-    # ⚠️ 顺序不能随便调：test_edge_flow 依赖后台线程 tick Clock 的节奏，
+    # ⚠️ 顺序不能随便调：test_local_flow 依赖后台线程 tick Clock 的节奏，
     #    前面跑过多 App 实例/频繁 Clock.tick() 会让它偶发 early=1。
     #    所以「设置弹窗」这组不碰异步节奏的测试放在最后跑。
     test_layout()
-    test_edge_flow()
-    test_edge_prefetch_parallel()
-    test_edge_progress_signal()
-    test_edge_advance_not_cut()
+    test_local_flow()
+    test_local_prefetch_parallel()
+    test_local_progress_signal()
+    test_local_advance_not_cut()
     test_config_backup()
     test_history()
     test_settings_popup()
@@ -1167,7 +1167,7 @@ def main_run():
     test_toc_follow()
     test_switch_backend_stops_old()
     test_freeze_detect_and_keepalive()
-    test_edge_play_retry()
+    test_local_play_retry()
     test_media_cmd_semantics()
     test_voice_editor_opens()
     test_ai_roles_logic()

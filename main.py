@@ -56,7 +56,7 @@ from app_wakelock_fg import WakelockFgMixin
 import role_config
 import role_parser
 import ai_roles
-from voice_template import VOICE_FRIENDLY, VoiceTemplate, voice_friendly
+from voice_template import VoiceTemplate, voice_friendly
 # ⚠️ STATE_STOPPED 也必须导入：_on_state 里用它决定「是否关闭前台服务」。
 #    漏了它会抛 NameError，而异常从按钮回调冒出 → Kivy 重新抛出 → **一点暂停就闪退**。
 from tts_android import (STATE_PAUSED, STATE_PLAYING, STATE_STOPPED,
@@ -489,6 +489,7 @@ class AudioBookApp(App, WakelockFgMixin):
         self._role_map = None         # 本书的人名↔编号映射（role_config.RoleMap）
         self._role_speakers = {}      # {(段落, 句子): 说话人}（role_parser 扫描结果）
         self._role_detected = []      # [(人名, 类别)] 最近一次识别结果（面板展示）
+        self._role_pool = []          # [(人名, 类别, 次数, 样本)] 完整候选池（AI 清洗输入）
         self._role_scan_version = 0   # 扫描版本号：换书/重识别后作废旧线程结果
         self._role_scan_force_new = False  # 重新识别时忽略已有映射文件
         self._role_scan_pending = None     # 后台线程扫完暂存，由 _tick 主线程取用
@@ -1261,15 +1262,30 @@ class AudioBookApp(App, WakelockFgMixin):
         popup.open()
 
     def _collect_role_samples(self, max_chars=3, max_len=60):
-        """把逐句说话人标注整理成 [(name, 原猜测类别, [对话片段...])]。"""
+        """整理 AI 精细识别的输入 [(name, 原猜测类别, [上下文片段...])]。
+
+        优先用正则扫描的完整候选池（含未达出场门槛的配角和叙述上下文）
+        —— 那些正则没能归对台词的角色（对话首秀）只有把上下文交给 AI
+        才救得回来；池子缺失（旧版扫描结果）时退回逐句说话人表。
+        """
         samples = {}
-        for (para_idx, sentence), name in (self._role_speakers or {}).items():
-            lst = samples.setdefault(name, [])
-            if len(lst) < max_chars:
-                s = str(sentence).strip()
-                if s:
-                    lst.append(s[:max_len])
         guess = {n: c for n, c in (self._role_detected or [])}
+        pool = getattr(self, "_role_pool", None) or []
+        if pool:
+            for item in pool:
+                name, _cat, _cnt, lines = (list(item) + [[], [], [], []])[:4]
+                ss = [str(s).strip()[:max_len] for s in (lines or [])
+                      if str(s).strip()]
+                if ss:
+                    samples[name] = ss[:max_chars]
+        else:
+            for (para_idx, sentence), name in (
+                    self._role_speakers or {}).items():
+                lst = samples.setdefault(name, [])
+                if len(lst) < max_chars:
+                    s = str(sentence).strip()
+                    if s:
+                        lst.append(s[:max_len])
         out = []
         for name, lines in samples.items():
             out.append((name, guess.get(name, ""), lines))
@@ -1686,6 +1702,7 @@ class AudioBookApp(App, WakelockFgMixin):
         self._role_map = None
         self._role_speakers = {}
         self._role_detected = []
+        self._role_pool = []
         self._role_scan_force_new = False
         self._engine.set_voice_resolver(None)
         self._scan_roles_async()
@@ -2047,7 +2064,7 @@ class AudioBookApp(App, WakelockFgMixin):
         def _work():
             result = None
             try:
-                result = role_parser.analyze(paras)
+                result = role_parser.analyze_full(paras)
             except Exception:
                 result = None          # 解析失败 → 调用方降级为单音色
             # ⚠️ 不能从后台线程 Clock.schedule_once（本项目实测会丢回调，
@@ -2079,9 +2096,10 @@ class AudioBookApp(App, WakelockFgMixin):
             self._engine.set_voice_resolver(None)
             self._on_error("角色识别失败，本书已降级为单音色朗读")
             return
-        characters, speakers = result
+        characters, speakers, pool = result
         self._role_detected = characters
         self._role_speakers = speakers or {}
+        self._role_pool = pool or []
 
         # 历史书籍打开：自动查找该书的映射配置文件；找到就加载，
         # 找不到（或点了「重新识别」）才重新识别并自动生成新映射
@@ -2097,12 +2115,24 @@ class AudioBookApp(App, WakelockFgMixin):
         if characters:
             self._toast("已识别 %d 个角色，多角色配音就绪" % len(characters))
 
+    def _narrator_params(self):
+        """旁白（无说话人句）的声音参数：模板「旁白」编号；没配则回全局。"""
+        try:
+            p = self._voice_template.get("旁白")
+        except Exception:
+            p = None
+        if p and p.get("voice"):
+            return (str(p["voice"]), float(p.get("rate", 1.0)),
+                    int(p.get("pitch", 0)))
+        return None
+
     def _role_voice_resolver(self, para_index, sentence):
         """引擎逐句回调（本地合成子线程，绝不能碰 UI）。
 
         这句是谁在说 → 该人物的声音参数 (voice, rate倍率, pitch Hz)；
         解析顺序：① 正则命中（role_speakers）② Qwen 逐句标注（代词/连续
-        对话）③ 返回 None → 引擎按全局音色读。
+        对话）③ 没有说话人（旁白/叙述行）→ 模板「旁白」编号，保证旁白
+        不和任何一个角色（尤其是栈顶主角）同声；④ 人物未绑定 → 全局音色。
         情感标签映射为语速微调（VITS 无原生情感维度，明示近似）。
         """
         try:
@@ -2114,13 +2144,16 @@ class AudioBookApp(App, WakelockFgMixin):
                 annot = getattr(self, "_ai_annot", {}).get(
                     (para_index, sentence))
                 if not annot:
-                    return None
+                    return self._narrator_params()
                 name, emotion = annot
             if not name or name in ("旁白", "未知"):
-                return None
+                return self._narrator_params()
             params = role_config.RoleMap.entry_params(
                 self._role_map.get(name), self._voice_template)
-            if params and emotion in ai_roles.EMOTION_RATE:
+            if params is None:
+                # 未绑定人物：朗读用全局单音色（与角色管理面板描述一致）
+                return None
+            if emotion in ai_roles.EMOTION_RATE:
                 v, mult, phz = params
                 mult = max(0.5, min(2.0, mult *
                                     ai_roles.EMOTION_RATE[emotion]))
@@ -2236,7 +2269,7 @@ class AudioBookApp(App, WakelockFgMixin):
         """
         if not (self._multi_role_enabled() and self._role_map is not None):
             return
-        # 系统音色：不在已合并音色列表的 edge 分组里
+        # 系统音色：不在已合并音色列表的 VITS 分组里
         src = None
         try:
             src = self._engine._voice_source_of(voice_name)
@@ -2413,7 +2446,7 @@ class AudioBookApp(App, WakelockFgMixin):
 
     # ---------------- 全局音色模板面板 ----------------
     def _show_template_panel(self, parent_popup=None):
-        """全局模板编辑：每个编号的 Edge 音色/音调/语速，改完全书同步。"""
+        """全局模板编辑：每个编号的 VITS 音色/语速，改完全书同步。"""
         if parent_popup is not None:
             parent_popup.dismiss()
         popup = Popup(title="音色模板（全局 · 所有小说共用）",
@@ -2456,7 +2489,7 @@ class AudioBookApp(App, WakelockFgMixin):
         popup.open()
 
     def _edit_template_slot(self, slot_id):
-        """编辑一个模板编号的 Edge 音色 / 音调 / 语速（保存即全局生效）。"""
+        """编辑一个模板编号的 VITS 音色 / 语速（保存即全局生效）。"""
         params = self._voice_template.get(slot_id)
         if not params:
             return
@@ -2512,7 +2545,7 @@ class AudioBookApp(App, WakelockFgMixin):
         self._preview_player = player
 
     def _preview_voice(self, voice):
-        """后台合成一句固定文本并播放（试听 Edge 音色效果）。"""
+        """后台合成一句固定文本并播放（试听音色效果）。"""
         voice = str(voice or "")
         if not voice:
             self._toast("请先选择音色")
@@ -2550,10 +2583,10 @@ class AudioBookApp(App, WakelockFgMixin):
         threading.Thread(target=_work, daemon=True).start()
 
     def _tts_voice_choices(self, current=""):
-        """Edge 音色下拉选项：返回 (标签列表, 标签→ShortName 映射)。
+        """音色下拉选项：返回 (标签列表, 标签→voice名 映射)。
 
-        优先用运行时拉到的 Edge 音色列表；还没拉到（网络慢/失败）时
-        退回内置已知清单，保证面板永远可用。
+        优先用运行时构建的本地 VITS 音色列表；模型还没导入时退回
+        模板里的自动音色令牌，保证面板永远可用。
         """
         names = []
         for v in getattr(self, "_voice_list", []):
@@ -2561,7 +2594,11 @@ class AudioBookApp(App, WakelockFgMixin):
             if v.get("source") == "local" and n and n not in names:
                 names.append(n)
         if not names:
-            names = list(VOICE_FRIENDLY.keys())
+            # 模型还没导入/列表没建好：退回模板里的自动音色令牌
+            for params in self._voice_template.all_slots().values():
+                v = params.get("voice")
+                if v and v not in names:
+                    names.append(v)
         if current and current not in names:
             names.insert(0, current)
         labels, mapping, taken = [], {}, set()
@@ -2807,7 +2844,7 @@ class AudioBookApp(App, WakelockFgMixin):
         ⚠️ 这就是「熄屏播放一段时间后停止、打开软件又恢复播放」的成因：
         熄屏后系统把本应用的**主进程**当缓存应用冻结（Android 11+ 的
         Cached Apps Freezer，vivo 还叠加自家后台管控），我们的 Python 推进
-        循环与联网合成都被挂起 —— 当前这句 mp3 播完，就再没人推进下一句。
+        循环与合成都被挂起 —— 当前这句播完，就再没人推进下一句。
         唤醒锁只保证 CPU 不睡，**不能**免冻结；按 UID 判定的「电池不优化」
         白名单是第三方应用唯一可靠的办法（同 services/playback.py 的注释）。
         """
@@ -3187,11 +3224,11 @@ class AudioBookApp(App, WakelockFgMixin):
         """卡死自检：播放态下长时间没有任何「有声进展」→ 自恢复，**绝不静默暂停**。
 
         信号优先级（缺一层就会误判，每一层都对应一次真实的误停）：
-          1. `is_busy()` —— 正在联网合成当前句（弱网可达十几秒），位置不动属
+          1. `is_busy()` —— 正在合成当前句（长句/低端机可达十几秒），位置不动属
              正常等待，直接清零计时；
           2. `progress_age()` —— 引擎自报「距上次有声进展」的秒数。有进展 =
              媒体位置前进 / isPlaying 真 / 开始播放 / 句末推进 / 正在合成。
-             这是唯一可信的信号：Edge 的 (段, 字符) 整句播放期间恒定，
+             这是唯一可信的信号：(段, 字符) 整句播放期间恒定，
              部分 ROM 的 `isPlaying()` 在正常播放时也恒为 false；
           3. 后端不提供 progress_age 时，退回「(段, 字符, 媒体毫秒) 变没变」。
 
@@ -3200,7 +3237,7 @@ class AudioBookApp(App, WakelockFgMixin):
         而且暂停是"没声音"的升级版（没声音 + 要人工干预）—— 两个都不可接受。
         宁可多试几次 / 跳过一句，也不让朗读停住。
         """
-        # 第一层：正在合成当前句（慢网络/抖动）→ 不算卡死，清掉计时重新算
+        # 第一层：正在合成当前句（长句/低端机较慢）→ 不算卡死，清掉计时重新算
         try:
             if self._engine.is_busy():
                 self._frozen_last = None
@@ -3722,7 +3759,7 @@ class AudioBookApp(App, WakelockFgMixin):
             _crash_last = ""
         # 保活：白名单状态 + 被系统冻结的次数/最近时长。
         # 「熄屏后念着念着停了、亮屏又接上」= 主进程被缓存冻结（Python 推进循环
-        # 与联网合成一起挂起）。这两个数字就是它的证据：冻结>0 且最近时长很大。
+        # 与合成一起挂起）。这两个数字就是它的证据：冻结>0 且最近时长很大。
         try:
             _bat = self.battery_allowlisted()
             _bat_s = ("已允许" if _bat else "未允许") if _bat is not None else "未知"

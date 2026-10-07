@@ -294,14 +294,14 @@ def check_ram():
 # 提示词与解析（纯函数，可单元测试）
 # ---------------------------------------------------------------------------
 def build_prompt(characters):
-    """characters: [(name, guess_category, [对话片段...])] → 提示词文本。"""
+    """characters: [(name, guess_category, [上下文片段...])] → 提示词文本。"""
     lines = ["你是小说人物分析师。下面是一部小说中出现的人物，以及每个人的"
-             "对话片段。括号里的「原猜测」来自简单规则，可能有错，仅供参考。",
+             "对话/叙述片段。括号里的「原猜测」来自简单规则，可能有错，仅供参考。",
              "这份候选清单来自正则抽取，可能混入非人名碎片（如\"决定\"、"
              "\"浑然不\"、\"包厢门\"）和切错的名字（\"路非明\"应为\"路明非\"）。",
              "任务：① 只保留确认是真实出场人物的名字，非人名碎片一律"
-             "不要输出；② 名字明显切错时输出正确写法；③ 根据对话内容"
-             "与语言风格判断性别和年龄段。",
+             "不要输出；② 名字明显切错时输出正确写法；③ 根据片段内容"
+             "（对话的语言风格、叙述里的代词/称谓）判断性别和年龄段。",
              "gender 只能是\"男\"或\"女\"；age 只能是\"少年\"、\"青年\"、"
              "\"中年\"、\"老年\"之一，不确定也要选最可能的。",
              "只输出一个 JSON 数组，不要任何解释、注释或代码块标记。格式：",
@@ -311,7 +311,7 @@ def build_prompt(characters):
     for i, (name, guess, samples) in enumerate(characters, 1):
         lines.append("%d. %s（原猜测：%s）" % (i, name, guess or "未知"))
         for s in samples:
-            lines.append("   对话：%s" % s[:60])
+            lines.append("   片段：%s" % s[:60])
     return "\n".join(lines)
 
 
@@ -355,12 +355,41 @@ def voice_category(gender, age):
             else "奶奶" if age == "老年" else "女角色")
 
 
+def _match_candidate(name, names):
+    """模型输出的名字 → 候选清单里的人名（对不上返回 None）。
+
+    提示词允许模型修正切错的名字（"路非明"→"路明非"），所以除了
+    精确匹配还接受两类受控修正（防幻觉：绝不接受完全陌生的名字）：
+      ① 包含关系：候选是输出名的子串（或反之），长度差 ≤2
+        （"恺撒" ⊆ "恺撒·加利亚"）；
+      ② 同字重排：字集相同（"路非明" → "路明非"）。
+    """
+    if name in names:
+        return name
+    if len(name) < 2:
+        return None
+    for cand in names:
+        if len(cand) < 2:
+            continue
+        if cand in name or name in cand:
+            if abs(len(cand) - len(name)) <= 2:
+                return cand
+            # 外国名按「·」分段：AI 输出全名（恺撒·加利亚）或短名（恺撒）
+            if name.startswith(cand + "·") or cand.startswith(name + "·"):
+                return cand
+    for cand in names:
+        if len(cand) == len(name) and sorted(cand) == sorted(name):
+            return cand
+    return None
+
+
 def parse_output(text, characters):
     """从模型输出解析 {name: 门类}。
 
     两级解析：JSON 数组 → 正则行匹配。两级都失败抛 AIError（带输出
-    尾部片段，便于定位是提示词问题还是模型输出跑飞）。解析出来但
-    名字对不上的条目忽略；没解析到的人物保持原猜测门类。
+    尾部片段，便于定位是提示词问题还是模型输出跑飞）。模型修正过/
+    包含匹配得上的名字回写到候选名；完全陌生的名字忽略（防幻觉）；
+    没解析到的人物保持原猜测门类。
     characters: [(name, guess_category, samples)]，用于兜底与对齐。
     """
     names = [c[0] for c in characters]
@@ -376,12 +405,13 @@ def parse_output(text, characters):
                     if not isinstance(item, dict):
                         continue
                     name = str(item.get("name", "")).strip()
-                    if name not in names:
+                    cand = _match_candidate(name, names)
+                    if cand is None:
                         continue
                     g = _norm_gender(item.get("gender", ""))
                     a = _norm_age(item.get("age", ""))
                     if g:
-                        result[name] = voice_category(g, a)
+                        result[cand] = voice_category(g, a)
         except Exception:
             result = {}
     if not result:

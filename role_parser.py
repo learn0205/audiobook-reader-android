@@ -81,6 +81,11 @@ _VERBS = ("说道", "问道", "答道", "喊道", "叫道", "笑道", "叹道", 
           "回答道", "强调道", "继续道", "赞叹道", "夸赞道", "称赞道",
           "感叹道", "惊叹道", "咆哮道", "沉吟道", "解释道", "总结道",
           "赞叹", "夸赞", "称赞", "感叹", "惊叹", "振振有词", "言简意赅",
+          # 引号后最高频的「……」XXX + 动作标签（真书实测）：
+          # 「芬格尔压低声音说」「楚子航忽然开口」「夏弥瞥了他一眼」
+          "压低声音", "压低了声音", "提高声音", "提高了声音", "放低声音",
+          "开口", "出声", "接话", "插话", "答话", "回话", "低语", "瞥",
+          "瞅",
           # 「人名 + 动作短语 + 道」是网文最高频的标签形态，必须整体成词，
           # 否则「路鸣泽抬起头道」会被切成「路鸣泽抬起头」这种碎片人名
           "抬起头", "低下头", "点点头", "摇摇头", "侧过头", "回过头",
@@ -270,6 +275,8 @@ STACK_LIMIT = 12          # 角色栈最深保留人数
 # 只出现一次的候选大多是「缓缓」「心中一凛」这类漏网误报；
 # 真正有台词的角色一本书里几乎不可能只出现一次。
 MIN_SPEAKER_MENTIONS = 4
+# 每个人物保留的上下文样本条数（AI 精细识别的提示词证据，太多会撑爆预算）
+_SAMPLE_CAP = 4
 
 # 人名里不该出现的字（真实中文人名基本不含这些虚词/助词）
 _FUNCTION_CHARS = set("着了过的地得吗呢吧啊呀哦嘛么也")
@@ -432,7 +439,14 @@ def _known_or_surnamed(cand, registry=None):
 
 
 def _tag_after_quote(text, close_idx, registry=None):
-    """在引号后的窗口里找「人名/代词 + 动词」（如：……。」夏弥说）。"""
+    """在引号后的窗口里找「人名/代词 + 动词」（如：……。」夏弥说）。
+
+    引号后位置是全书最强的说话人证据（引号一结束就跟人名的，几乎必然
+    是刚说完话的人），所以对**没登记过的新人名**放宽姓氏门槛：
+    名字形状合格 + 剩余全是修饰语 + 首字不是介词/时间字即可。
+    （「昂热说道」「芬格尔点点头」这类首次出场的对话标签不再漏掉；
+    「到时候再说」「这样的话」由首字闸 + 修饰语覆盖闸拦住。）
+    """
     window = text[close_idx + 1:close_idx + 16]
     m = _VERB_RE.search(window)
     if not m:
@@ -456,7 +470,50 @@ def _tag_after_quote(text, close_idx, registry=None):
             if _covered_by_modifiers(rest):
                 if _known_or_surnamed(cand, registry):
                     return cand
+                # 新人名放宽档：只认 2~3 字且首字不像介词/时间字
+                if (length <= 3 and cand[0] not in _TAG_FALSE_HEADS
+                        and registry is not None):
+                    return cand
     return None
+
+
+# 引号后放宽档的候选首字黑名单：这些字开头的基本是介词/时间短语
+# （「到时候再说」「话说到了这份上」），不是人名。
+_TAG_FALSE_HEADS = set("到对给跟朝向冲往随顺经据按依凭因由自当趁赶挨就"
+                       "便即立旋忽倏适值临逢一每另另外其那这")
+
+
+def _tag_after_boundary(text, close_idx, registry=None):
+    """引号后「人名 + 任意动作描写」标签（无说话动词）：
+    「……」芬格尔从一堆报纸后面探出头。/「……」夏弥把书放在桌上。
+
+    这类后置动作是人名**紧跟引号**出现，是前一个引号说话人的强证据，
+    但因为没有说话动词，_VERB_RE 匹配不到 → _tag_after_quote 返回 None。
+    这里用「人名后紧跟边界字」的形状判定补位：候选名必须形状合格 +
+    已登记或有姓氏背书 + 无强动词字，人名后第一个字是虚词/动作起始字。
+    """
+    window = text[close_idx + 1:close_idx + 7]
+    for length in (2, 3, 4):
+        if len(window) <= length:
+            break
+        cand, nxt = window[:length], window[length]
+        if nxt not in _BOUNDARY_CHARS:
+            continue
+        if not _is_plausible_name(cand):
+            continue
+        if any(v in cand for v in _STRICT_VERB_CHARS):
+            continue
+        if _known_or_surnamed(cand, registry):
+            return cand
+    return None
+
+
+# 「人名 + 动作描写」的边界字：虚词/动作起始字。
+# 「芬格尔[从]口袋里掏出钥匙」「夏弥[把]书放在桌上」「恺撒[朝]他走来」。
+_BOUNDARY_CHARS = set(
+    "从把将对朝向冲往在和跟与给用拿望看瞥瞅笑叹摇点拍挠摸揉皱眯竖顿咬"
+    "抿瞪凑回抬低侧转深轻慢端站坐走跑退进出落停靠吐呼喘挥摆搂抱背扛拽"
+    "扯拉托推接递扶蹲跳跪伸收")
 
 
 class _Registry:
@@ -467,6 +524,15 @@ class _Registry:
         self.gender_votes = {}    # 人名 -> [男票, 女票]
         self.age_votes = {}       # 人名 -> {"old_f": n, "old_m": n}
         self.speaker_count = {}   # 人名 -> 确认为说话人/动作主语的次数
+        self.samples = {}         # 人名 -> [上下文片段]（AI 清洗用）
+
+    def add_sample(self, name, text):
+        """记一条人物上下文样本（去重，每人名最多 _SAMPLE_CAP 条）。"""
+        if not text:
+            return
+        lst = self.samples.setdefault(name, [])
+        if len(lst) < _SAMPLE_CAP and text not in lst:
+            lst.append(text)
 
     def register(self, name):
         if name not in self.gender_votes:
@@ -557,11 +623,35 @@ class _Registry:
                 for name in self.order
                 if self.speaker_count.get(name, 0) >= MIN_SPEAKER_MENTIONS]
         kept.sort(key=lambda x: -x[1])
+        alive = self._dedup_fragments(kept)
+        return [(name, self.category(name)) for name in self.order
+                if name in alive]
+
+    def result_full(self):
+        """完整候选池（AI 精细识别的输入）。
+
+        [(人名, 类别, 确认次数, [上下文样本...])]，含未达出场门槛的候选
+        —— 正则阈值之下还有大量真实配角（对话首秀、只出场两三次），
+        只有交给 AI 按上下文甄别才救得回来。按确认次数降序排列：
+        AI 提示词有 token 预算，最重要的角色排在最前面。
+        """
+        kept = [(name, self.speaker_count.get(name, 0))
+                for name in self.order
+                if self.speaker_count.get(name, 0) >= 1]
+        kept.sort(key=lambda x: -x[1])
+        alive = self._dedup_fragments(kept)
+        return [(name, self.category(name), cnt,
+                 list(self.samples.get(name, [])))
+                for name, cnt in kept if name in alive]
+
+    @staticmethod
+    def _dedup_fragments(scored):
+        """scored: [(人名, 次数)]（按重要性排序）→ 子串碎片合并的存活集合。"""
         dropped = set()
-        for i, (a, ca) in enumerate(kept):
+        for i, (a, ca) in enumerate(scored):
             if a in dropped:
                 continue
-            for j, (b, cb) in enumerate(kept[i + 1:], i + 1):
+            for j, (b, cb) in enumerate(scored[i + 1:], i + 1):
                 if b in dropped or b == a:
                     continue
                 winner = None
@@ -583,8 +673,7 @@ class _Registry:
                     dropped.add(b if winner is a else a)
                     if winner is b:      # 当前 a 被合并 → 换下一个 a
                         break
-        return [(name, self.category(name)) for name in self.order
-                if name in set(n for n, _ in kept) - dropped]
+        return {n for n, _ in scored} - dropped
 
 
 class _Stack:
@@ -708,6 +797,8 @@ def _process_paragraph(pi, para, registry, stack, speakers, light=False):
         token = _tag_before_quote(para, o, registry)
         if token is None:
             token = _tag_after_quote(para, c, registry)
+        if token is None:
+            token = _tag_after_boundary(para, c, registry)
         spk = _apply_tag(token, registry, stack)
         if spk is not None:
             touched.append(spk)
@@ -743,20 +834,30 @@ def _process_paragraph(pi, para, registry, stack, speakers, light=False):
             if spk:
                 speakers[(pi, frag)] = spk
 
-    # 4) 性别/年龄投票：本段出现过的人物，用整段文本里的代词/称谓投票
-    #    （只投本段出现过的少数人物，避免全书 O(段×人名) 的扫描）
+    # 4) 性别/年龄投票 + 上下文样本：本段出现过的人物，用整段文本里的
+    #    代词/称谓投票（只投本段出现过的少数人物，避免全书 O(段×人名) 的
+    #    扫描）；样本取人名邻近的上下文窗口（AI 清洗的证据材料）
     for name in set(touched):
         if name and name in para:
             registry.vote(name, para)
+            if len(registry.samples.get(name, ())) < _SAMPLE_CAP:
+                i = para.find(name)
+                if i >= 0:
+                    registry.add_sample(
+                        name, para[max(0, i - 12): i + len(name) + 18].strip())
 
 
-def analyze(paragraphs):
-    """扫描整本书（两遍）。
+def analyze_full(paragraphs):
+    """扫描整本书（两遍）。analyze() 的完整版，多返回一个候选池。
 
-    返回 (characters, speakers)：
+    返回 (characters, speakers, pool)：
       characters = [(人名, 类别), ...] 按首次出场排序（只含达到
                    MIN_SPEAKER_MENTIONS 门槛的人物）；
-      speakers   = {(段落下标, 切分片段): 说话人名}，旁白片段不进表。
+      speakers   = {(段落下标, 切分片段): 说话人名}，旁白片段不进表；
+      pool       = [(人名, 类别, 确认次数, [上下文样本...])]，**含未达
+                   门槛的候选**、按确认次数降序 —— 这是「AI 精细识别」
+                   的输入：正则阈值之下的大量真实配角（对话首秀角色）
+                   只有交给 AI 按上下文甄别才救得回来。
 
     为什么两遍：代词「他说道/她说道」的性别消歧依赖**全书**的投票结果
     （夏弥是女这件事可能到很后面才有「她」的证据）。第一遍只登记人物、
@@ -795,4 +896,10 @@ def analyze(paragraphs):
         if pi % 400 == 399:
             _time.sleep(0.001)       # 完全释放 GIL，让 UI 喘口气
 
-    return registry.result(), speakers
+    return registry.result(), speakers, registry.result_full()
+
+
+def analyze(paragraphs):
+    """扫描整本书，返回 (characters, speakers)。完整版见 analyze_full()。"""
+    characters, speakers, _pool = analyze_full(paragraphs)
+    return characters, speakers

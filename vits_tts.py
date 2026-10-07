@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """vits_tts.py —— 本地语音合成：sherpa-onnx VITS + vits-zh-hf-fanchen-C
 
-定位（完全离线，替代已删除的 Edge-TTS 在线合成）
+定位（完全离线本地合成，主音源）
 ------------------------------------------------
 fanchen-C：中文多说话人 VITS，187 个音色，模型 116MB、16kHz。
 sherpa-onnx 官方收录（安卓端被 tts-server-android 等大量项目验证），
