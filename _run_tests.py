@@ -10,6 +10,9 @@
   6) 「卡死自检」信号源：位置前进才算在出声 / 句中停住不切句 / 坏缓存能重开
      （见 test_local_progress_signal、test_local_advance_not_cut）
   7) 外部播放/暂停命令按语义幂等执行，不再反转状态（见 test_media_cmd_semantics）
+  8) 「点播放 → 首声」提速：预取等起播后才触发（不与当前句抢合成锁，
+     见 test_prefetch_starts_after_playback）；选离线音色即后台预载引擎
+     （见 test_vits_prewarm_on_voice_select）
 """
 import os
 import sys
@@ -174,6 +177,94 @@ def test_local_prefetch_parallel():
     check("local: 预取覆盖 index+1/+2/+3",
           ("后续一。" in calls) and ("后续二。" in calls) and ("后续三。" in calls),
           "calls=%s" % calls)
+
+
+def test_prefetch_starts_after_playback():
+    """预取必须等本句起播（_play_file）才触发，不得与当前句抢 _synth_lock。
+
+    冷启动时合成锁里还含模型加载：若预取线程先抢到锁，当前句要排队等
+    「加载 + 下一句合成」→ 点播放后首声被拖长。修复后当前句的合成线程
+    是起播前唯一的合成者，首句必然最先合成。桌面端 _post_to_main 是同步
+    直调，调用顺序完全确定，可直接断言。
+    """
+    import vits_tts
+    from tts_engine import LocalTTS
+
+    order = []
+
+    def fake_synth(text, voice, path, rate="+0%", pitch="+0Hz", volume="+0%"):
+        order.append("synth:%s" % text)
+        with open(path, "wb") as f:
+            f.write(b"FAKEWAV")
+        return 7
+
+    vits_tts.synthesize_to_file = fake_synth
+
+    e = LocalTTS()
+    e._cache_dir = tempfile.mkdtemp()
+    e.set_voice("vits:0")
+    e.load(["第一句。", "第二句。", "第三句。", "第四句。"])
+    real_pf = e._prefetch_ahead
+
+    def spy_pf(idx, gen):
+        order.append("prefetch:%d" % idx)
+        real_pf(idx, gen)
+
+    e._prefetch_ahead = spy_pf
+    e.play(0)
+    # 起播后的预取在后台线程跑，轮询等它出现（最多 3 秒）
+    deadline = time.time() + 3
+    while time.time() < deadline and not any(
+            o.startswith("prefetch:") for o in order):
+        time.sleep(0.02)
+    check("prefetch: 首句最先合成（不被预取抢锁）",
+          bool(order) and order[0] == "synth:第一句。", "order=%s" % order[:4])
+    check("prefetch: 预取在首句合成之后才触发",
+          any(o.startswith("prefetch:") for o in order),
+          "order=%s" % order[:6])
+
+
+def test_vits_prewarm_on_voice_select():
+    """选中/恢复离线音色 → 后台预载 VITS 引擎（点播放前先付掉加载成本）。
+
+    以前 116MB 模型只在点播放后的第一次合成里加载，用户点 ▶ 后要干等
+    十几秒冷加载。现在 set_voice 到本地音色的一刻就该在后台 ensure_loaded；
+    系统音色不预热（用不上 VITS）。
+    """
+    import vits_tts
+    import tts_engine
+
+    warmed = []
+    orig_ensure = vits_tts.ensure_loaded
+
+    def fake_ensure(data_dir):
+        warmed.append(data_dir)
+        return None
+
+    vits_tts.ensure_loaded = fake_ensure
+    try:
+        r = tts_engine.ReaderTTS(on_error=lambda *a: None,
+                                 user_data_dir=tempfile.mkdtemp())
+        check("prewarm: 系统后端 local_engine_loaded 恒 True",
+              r.local_engine_loaded() is True,
+              "loaded=%s" % r.local_engine_loaded())
+        # 先选系统音色：不得触发预载
+        r._merged_voices = [{"name": "sys-x", "source": "android"}]
+        r.set_voice("sys-x")
+        time.sleep(0.15)
+        check("prewarm: 选系统音色不触发预载", not warmed,
+              "warmed=%d" % len(warmed))
+        # 切到离线音色：后台预载被触发（线程异步，轮询等一下）
+        r._merged_voices = [{"name": "sys-x", "source": "android"},
+                            {"name": "vits:5", "source": "local"}]
+        r.set_voice("vits:5")
+        deadline = time.time() + 3
+        while time.time() < deadline and not warmed:
+            time.sleep(0.02)
+        check("prewarm: 选离线音色触发后台预载", len(warmed) == 1,
+              "warmed=%d" % len(warmed))
+    finally:
+        vits_tts.ensure_loaded = orig_ensure
 
 
 def test_config_backup():
@@ -1180,6 +1271,8 @@ def main_run():
     test_layout()
     test_local_flow()
     test_local_prefetch_parallel()
+    test_prefetch_starts_after_playback()
+    test_vits_prewarm_on_voice_select()
     test_local_progress_signal()
     test_local_advance_not_cut()
     test_config_backup()

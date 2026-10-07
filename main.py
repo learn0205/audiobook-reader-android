@@ -1985,6 +1985,7 @@ class AudioBookApp(App, WakelockFgMixin):
             return
         index = max(0, min(int(index), len(self._paragraphs) - 1))
         self._follow = True          # 点段落开始朗读 → 恢复「高亮跟随」
+        self._warn_vits_loading_once()
         self._engine.play(index)
         self._set_highlight(index)
         self._toast("从第 %d 段开始朗读" % (index + 1))
@@ -2216,6 +2217,10 @@ class AudioBookApp(App, WakelockFgMixin):
 
         def _work():
             try:
+                # 离线音色：先等首句真正出声再启动 Qwen 子进程——llama-cli
+                # 加载 1.5B + prefill 会把 CPU 吃满，若在点播放的一瞬间就开跑，
+                # 会跟 VITS 冷加载/首句合成抢核，「点播放 → 首声」被拖得更长。
+                self._wait_first_audio()
                 result = ai_roles.annotate_sentences(
                     self.user_data_dir, lines, known)
                 by_key = {}
@@ -2257,6 +2262,27 @@ class AudioBookApp(App, WakelockFgMixin):
         h = hashlib.md5(("%s|%s" % (self._book_key, win)).encode(
             "utf-8", "replace")).hexdigest()
         return os.path.join(self.user_data_dir, "ai_annot", h + ".json")
+
+    def _wait_first_audio(self, timeout=120.0):
+        """后台线程专用：离线音色下等首句真正出声（或播放停止/超时）再返回。
+
+        只在当前音色是 VITS 离线音色时等待；系统音色直接返回（不涉及
+        VITS 合成）。播放一旦停止/暂停（含合成失败停机）立即放行，
+        超时兜底也放行——标注只是锦上添花，绝不能被它卡住。
+        """
+        if not str(self._config.get("voice_name", "")).startswith("vits:"):
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if self._engine.get_state() != STATE_PLAYING:
+                    return
+                _playing, pos = self._engine.media_position()
+                if pos >= 0:
+                    return
+            except Exception:
+                return
+            time.sleep(0.5)
 
     def _multi_role_btn_text(self):
         return "已开启" if self._multi_role_enabled() else "已关闭"
@@ -2750,6 +2776,21 @@ class AudioBookApp(App, WakelockFgMixin):
         para = max(0, min(int(para), len(self._paragraphs) - 1))
         self._seek_to(para, "已跳转到书签：第 %d 段" % (para + 1))
 
+    def _warn_vits_loading_once(self):
+        """离线引擎冷加载提示：点播放时引擎还没加载完，说一声为什么还没声。
+
+        只提示一次（每次会话）：加载是幂等的一次性开销，说多了反而烦。
+        """
+        try:
+            if self._engine.local_engine_loaded():
+                return
+            if getattr(self, "_vits_load_toast_shown", False):
+                return
+            self._vits_load_toast_shown = True
+            self._toast("离线语音引擎首次加载中（约需十几秒），请稍候…")
+        except Exception:
+            pass
+
     def toggle_play(self):
         if not self._paragraphs:
             self._toast("请先打开一本书")
@@ -2765,6 +2806,7 @@ class AudioBookApp(App, WakelockFgMixin):
             else:
                 self._follow = True
                 para, _, _ = self._engine.get_position()
+                self._warn_vits_loading_once()
                 self._engine.play(para)
         except Exception:
             # Kivy 会吞掉按钮回调里的异常 —— 这里显式留痕，便于定位「暂停闪退」

@@ -579,12 +579,10 @@ class LocalTTS:
         self._synth_thread = threading.Thread(
             target=self._synthesize_and_play, args=args, daemon=True)
         self._synth_thread.start()
-        # 提前预取：当前句还没合成就先在后台合成后面几句（各自独立线程并行），
-        # 比「等本句开始播放才预取」早了一个合成周期，避免短句快播时下一句来不及
-        # 合成而现场等待。
-        # 用 self._index（当前句）作基准；generation 变化会自行停止旧的预取。
-        threading.Thread(target=self._prefetch_ahead,
-                         args=(self._index, gen), daemon=True).start()
+        # ⚠️ 预取不在 _speak_current 启动（改到 _play_file 起播后）：
+        #    合成全程持 _synth_lock（首次还含模型加载），预取线程若先抢到锁，
+        #    当前句反而要等「加载+下一句合成」——冷启动时点播放的首声被拖长。
+        #    起播后再预取，本句整个播放时长都够后台合成 +1/+2/+3。
 
     def _synth_params(self):
         """把 app 的 speed/pitch 档位换算成合成入口的 rate/pitch/volume 字符串。"""
@@ -713,8 +711,10 @@ class LocalTTS:
         if generation != self._generation:
             return
         self._stop_player()
-        # 预取已在 _speak_current（当前句一开始合成）时启动，这里不再重复触发；
-        # 真正起播时若发现后面某句仍没缓存，推进时还有兜底合成（_synth_text_for）。
+        # 预取从「本句真正起播」才开始（不在 _speak_current 抢锁，见
+        # _prefetch_ahead 的说明）；起播时若发现后面某句仍没缓存，
+        # 推进时还有兜底合成（_synth_text_for）。
+        self._prefetch_ahead(self._index, generation)
         if not _JNIUS_OK:
             # 桌面环境无播放器，直接按预估时长推进（仅用于逻辑测试）
             self._synthesizing = False
@@ -790,16 +790,19 @@ class LocalTTS:
         self._complete_current()
 
     def _prefetch_ahead(self, sent_index, generation):
-        """当前句还在合成/播放时，后台并行预合成后面的若干句。
+        """本句起播后，后台并行预合成后面的若干句。
 
         逐句合成模式下，以前播完本句才发现下一句要**现合成**，
         一次推理（0.2~3s）全部变成了停顿。预取命中后推进直接播本地
         缓存 wav，无需等待，间隔即消失。
 
-        改进点（与早期版本相比）：
-          · 触发时机提前到 _speak_current（当前句一开始合成就并行预取），
-            比「本句开始播放才预取」早了一个合成周期，短句快播也能命中；
-          · 深度 1→3，且**每句独立线程并行**合成（而非串行等上一句跑完），
+        触发时机：_play_file（本句真正起播）而不是 _speak_current ——
+        合成全程持 _synth_lock（首次还含模型冷加载），预取若与当前句
+        同时抢锁、又抢先拿到，当前句就得排队，「点播放 → 首声」被拖长。
+        起播后预取，本句的整个播放时长都够合成 +1/+2/+3，句间间隔不变。
+
+        其他设计：
+          · 深度 3，且**每句独立线程并行**合成（而非串行等上一句跑完），
             避免「+1 慢 → +2/+3 全被拖慢」；
           · 单句失败只放弃该句（不再整批 return），其他句照常预取。
 
@@ -1147,6 +1150,43 @@ class ReaderTTS:
         if src != self._active:
             self._switch_backend(src)
         self._backend().set_voice(name)
+        if src == "local":
+            self._prewarm_local_async()
+
+    def _prewarm_local_async(self):
+        """选中/恢复离线音色 → 后台预载 VITS 引擎（绝不阻塞 UI）。
+
+        fanchen-C 冷加载（116MB 模型 + jieba）真机要十几秒。以前这笔开销
+        全部落在「点播放后的第一次合成」里，用户点 ▶ 后干等没声音；现在
+        选音色/启动恢复音色的一刻就开始后台加载，等真正点 ▶ 时引擎通常
+        已就绪，首句直接合成。幂等：_load_lock 保证并发/重复调用只加载一次。
+        """
+        try:
+            import vits_tts
+        except Exception:
+            return
+        data_dir = self._user_data_dir or "."
+        vits_tts._current_data_dir[0] = data_dir
+        inst = vits_tts.get_instance(data_dir)
+        if inst.is_loaded() or inst.disabled():
+            return
+        threading.Thread(target=vits_tts.ensure_loaded,
+                         args=(data_dir,), daemon=True).start()
+
+    def local_engine_loaded(self):
+        """VITS 引擎是否已加载完成（系统音色后端恒 True，调用方无需判断来源）。
+
+        main.py 用它决定要不要提示「引擎首次加载中」——冷加载期间点播放
+        是有一段无声等待的，说出来比让用户以为坏了强。
+        """
+        if self._active != "local":
+            return True
+        try:
+            import vits_tts
+            return vits_tts.get_instance(
+                self._user_data_dir or ".").is_loaded()
+        except Exception:
+            return True
 
     def set_book_tag(self, tag):
         """当前书的缓存子目录标签（透传给本地合成后端）。"""

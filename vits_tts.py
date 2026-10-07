@@ -15,7 +15,9 @@ sherpa-onnx 官方收录（安卓端被 tts-server-android 等大量项目验证
 
 架构（沿用已验证的 ctypes 子系统）
 ----------------------------------
-· 模型懒加载：只在合成线程首次使用时初始化，绝不阻塞 UI
+· 模型懒加载 + 后台预热：首次使用时初始化（绝不阻塞 UI）；
+  宿主在「选中/恢复离线音色」时即调 ensure_loaded 后台预载，
+  点播放时引擎通常已就绪，不必等十几秒冷加载
 · 崩溃熔断：加载前写 pending 标记，进程死亡后下次自动禁用
 · 内存闸门：可用内存不足直接给可读错误
 · 合成互斥：预取线程并发调同一句柄不安全，全部串行
@@ -403,6 +405,17 @@ def get_instance(data_dir):
     return _instances[key]
 
 
+def ensure_loaded(data_dir):
+    """后台预热入口：提前把引擎加载好（在点播放之前先付掉加载成本）。
+
+    fanchen-C 模型 116MB + jieba 词典初始化，真机冷加载要十几秒——
+    若等点播放后才在合成线程里加载，用户点 ▶ 后是一段无声等待。
+    幂等且线程安全：内部 _load_lock 保证只加载一次；失败只置熔断标记
+    （真正合成时会给出可读原因），这里不抛异常。
+    """
+    return get_instance(data_dir)._ensure_loaded()
+
+
 class _VitsTTS:
     def __init__(self, data_dir):
         self.data_dir = data_dir
@@ -640,7 +653,9 @@ class _VitsTTS:
         vits.dict_dir = (dict_dir or "").encode()
         mc = ModelConfig()
         mc.vits = vits
-        mc.num_threads = 2
+        # 4 线程：模块 docstring 里的 RTF 参考值（树莓派4 上 1.6）本就是按
+        # 4 线程测的；手机 4 个大核跑 4 线程把单句合成再压一档，首句出声更快。
+        mc.num_threads = 4
         mc.debug = 0
         mc.provider = b"cpu"
         cfg = TtsConfig()
