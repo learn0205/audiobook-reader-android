@@ -2640,6 +2640,7 @@ class AudioBookApp(App, WakelockFgMixin):
         voice_row.add_widget(spinner)
         btn_preview = ABButton(text="▶ 试听", size_hint_x=None, width=dp(84),
                                font_size="12sp")
+        self._clip_text(btn_preview)
         btn_preview.bind(on_release=lambda *_: self._preview_voice(
             state["voice"]))
         voice_row.add_widget(btn_preview)
@@ -3836,8 +3837,20 @@ class AudioBookApp(App, WakelockFgMixin):
                 self._config.save()
                 self._warn_multi_role_backend(name)
         spinner.bind(text=_pick_voice)
-        # 音色名可能很长：同样按「留边距 + 自动长高」排，别让它顶出弹窗
-        box.add_widget(self._safe_text(spinner, min_height=dp(44)))
+
+        # 音色名可能很长：同样按「留边距 + 自动长高」排，别让它顶出弹窗。
+        # 右侧固定一个「试听」：合成走 vits_tts、播放走 MediaPlayer，
+        # 和朗读链路完全独立 —— 「试听有声、播放无声」即可把问题定位到
+        # 播放链路；「试听也失败」则弹出的就是引擎/模型层的真实错误。
+        voice_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        voice_row.add_widget(self._safe_text(spinner, min_height=dp(44)))
+        btn_preview_voice = ABButton(text="▶ 试听", size_hint_x=None,
+                                     width=dp(84), font_size="12sp")
+        self._clip_text(btn_preview_voice)
+        btn_preview_voice.bind(on_release=lambda *_: self._preview_voice(
+            str(self._config.get("voice_name", ""))))
+        voice_row.add_widget(btn_preview_voice)
+        box.add_widget(voice_row)
 
         # ---- 音调 ----
         box.add_widget(self._slider_row("音调", -10, 10,

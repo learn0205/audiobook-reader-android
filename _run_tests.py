@@ -797,6 +797,29 @@ def test_switch_backend_stops_old():
           "para=%s" % (r._local.get_position()[0] if r._local else None))
 
 
+def test_vits_voice_forces_local_backend():
+    """「vits:」前缀音色不在合并列表里时，也必须路由到本地后端。
+
+    曾经的 bug：启动恢复上次音色（或合并列表还没建好）时 `_merged_voices`
+    为空，`_voice_source_of` 返回当前后端（android）→ 系统引擎拿着
+    "vits:34" 这个不存在的音色名 setVoice 不生效 → 用户选了离线音色
+    却完全没有声音。
+    """
+    from tts_engine import ReaderTTS
+
+    r = ReaderTTS(on_error=lambda *a: None, user_data_dir=tempfile.mkdtemp())
+    r._merged_voices = []                     # 列表还没合并好（启动常见）
+    check("voice_source: vits: 前缀强制走本地（列表缺失也照切）",
+          r._voice_source_of("vits:34") == "local",
+          str(r._voice_source_of("vits:34")))
+    check("voice_source: 系统音色名维持当前后端",
+          r._voice_source_of("some-sys-voice") == r._active)
+    # 切换后确实落在本地后端上
+    r.set_voice("vits:34")
+    check("voice_source: set_voice 后活跃后端为 local",
+          r._active == "local", "active=%s" % r._active)
+
+
 def test_freeze_detect_and_keepalive():
     """「熄屏播放一段时间后停止、打开软件又恢复」对应的两件事：
 
@@ -1166,6 +1189,7 @@ def main_run():
     test_long_press_play_index()
     test_toc_follow()
     test_switch_backend_stops_old()
+    test_vits_voice_forces_local_backend()
     test_freeze_detect_and_keepalive()
     test_local_play_retry()
     test_media_cmd_semantics()

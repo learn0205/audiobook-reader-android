@@ -182,6 +182,7 @@ class LocalTTS:
         self._last_media_pos = -1    # 上次读到的媒体位置（毫秒）
         self._pos_frozen = 0         # 媒体位置连续没变化的 tick 数（判「播完」用）
         self._last_player_step = ""  # 起播失败时卡在哪一步（错误信息里带上）
+        self._last_synth_error = ""  # 最近一次合成失败原因（连续失败停止时上报）
         self._prefetch_inflight = set()   # 预取中的缓存键（去重，防止同句并发合成）
         self._ready = True           # 本地引擎不需要离线初始化，构造即可用
         self._init_error = ""
@@ -634,6 +635,7 @@ class LocalTTS:
                     # 本地合成失败：跳过当前片段 + 记录日志 + 继续下一段
                     # （规格要求：绝不卡死 App；连续失败由 _on_synth_error 停机）
                     self._error_count += 1
+                    self._last_synth_error = str(serr)
                     self.on_error("本地合成失败已跳过该句：%s" % serr)
                     _post_to_main(lambda: self._on_synth_error(generation))
                     return
@@ -646,6 +648,7 @@ class LocalTTS:
             if generation != self._generation:
                 return
             self._error_count += 1
+            self._last_synth_error = str(e)
             self.on_error("本地合成失败：%s" % e)
             _post_to_main(lambda: self._on_synth_error(generation))
 
@@ -655,6 +658,11 @@ class LocalTTS:
         self._synthesizing = False
         self._spoken_uid = None
         if self._error_count >= 10:
+            # ⚠️ 连续失败必须把原因喊出来再停——以前直接 stop()，用户只看到
+            # 「没声音」，真正的错误（引擎熔断/模型不完整/内存不足）被去重
+            # 逻辑吞在一条 2 秒的 toast 里，无从排查。
+            self.on_error("本地合成连续失败已停止朗读——最后错误：%s"
+                          % (self._last_synth_error or "未知"))
             self.stop()
         else:
             self._advance()
@@ -977,7 +985,14 @@ class ReaderTTS:
         threading.Thread(target=self._build_local_voices, daemon=True).start()
 
     def _build_local_voices(self):
-        """本地 VITS 音色列表（fanchen-C，模型导入后可用；无网络请求）。"""
+        """本地 VITS 音色列表（fanchen-C，模型导入后可用；无网络请求）。
+
+        ⚠️ 本函数在后台线程跑（导入标注后 refresh_local_voices 也会调）：
+        回主线程必须走 _post_to_main（安卓主线程 Handler）。**不能用
+        Clock.schedule_once** —— 后台线程往 Clock 塞事件会丢回调（本项目
+        实测，见 _post_to_main 注释），丢一次的表现就是「导入音色标注后
+        下拉列表永远还是旧的（未标注）」。
+        """
         try:
             import vits_tts
             vits_tts._current_data_dir[0] = self._user_data_dir or "."
@@ -992,9 +1007,8 @@ class ReaderTTS:
         except Exception as e:
             self._local_voices = []
             self.on_error("本地音色列表获取失败：%s" % e)
-        from kivy.clock import Clock
-        Clock.schedule_once(lambda dt: self._merge_and_report(
-            [dict(x, source="android") for x in self._android.get_voices()]), 0)
+        _post_to_main(lambda: self._merge_and_report(
+            [dict(x, source="android") for x in self._android.get_voices()]))
 
     def refresh_local_voices(self):
         """VITS 模型导入/下载完成后调用：重算音色列表并通知 UI。"""
@@ -1125,7 +1139,7 @@ class ReaderTTS:
             self._local.set_intonation(enabled)
 
     def set_voice(self, name):
-        """切换音色：按 name 在合并列表里查来源，必要时切换后端并恢复进度。"""
+        """切换音色：按 name 查来源，必要时切换后端并恢复进度。"""
         self._voice_name = str(name)
         src = self._voice_source_of(name)
         if src is None:
@@ -1155,7 +1169,14 @@ class ReaderTTS:
         for v in self._merged_voices:
             if v.get("name") == name:
                 return v.get("source")
-        # 没在列表里（例如启动时还没构建本地音色列表）时，用默认 android
+        # 不在合并列表里时的判定：
+        # · "vits:" 前缀是本地离线音色的专属命名 → 必须走本地后端。
+        #   不能因「列表还没合并好」就留在系统引擎——系统引擎没有这个
+        #   音色名，setVoice 不生效，表现是「选了离线音色却没有声音」。
+        #   （启动恢复上次音色时列表常为空，正是这条路径。）
+        if str(name).startswith("vits:"):
+            return "local"
+        # 其余（例如系统音色名）：维持当前后端
         return self._active
 
     def _switch_backend(self, target):
